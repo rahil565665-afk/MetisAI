@@ -1,0 +1,47 @@
+{
+  "name": "dentdesk-receptionist-console",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:api": "NODE_ENV=development PORT=3001 tsx watch src/server/index.ts",
+    "dev:web": "vite --host 0.0.0.0 --port 3000 --strictPort",
+    "dev:worker": "pnpm build && wrangler dev",
+    "build": "pnpm typecheck && vite build",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types --strict-vars=false",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "check": "pnpm typecheck && pnpm test",
+    "deploy": "pnpm build && wrangler deploy",
+    "start": "NODE_ENV=development tsx src/server/index.ts"
+  },
+  "dependencies": {
+    "@pipecat-ai/client-js": "^1.15.0",
+    "@pipecat-ai/websocket-transport": "^1.8.1",
+    "@supabase/supabase-js": "^2.118.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.3.0",
+    "jose": "^6.2.13",
+    "lucide-react": "^0.468.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "wrangler": "^4.156.0"
+  }
+}

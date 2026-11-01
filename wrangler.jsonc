@@ -1,0 +1,63 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dentdesk-console",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-10-29",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  // Not a secret. Without it the server would treat the Worker as a local development run.
+  // Everything private (passcode, signing key, Supabase, encryption key, public URL) is set as a
+  // Cloudflare Secret instead; secrets survive deploys and are never stored in this file.
+  "vars": {
+    "NODE_ENV": "production"
+  },
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api/*",
+      "/agents/*"
+    ]
+  },
+  "containers": [
+    {
+      "name": "clinic-agent",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./agent/Dockerfile",
+          "build_context": "./agent"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLINIC_AGENTS",
+        "class_name": "ClinicAgent"
+      },
+      {
+        "name": "LOGIN_LIMITER",
+        "class_name": "LoginLimiter"
+      }
+    ]
+  },
+  "exports": {
+    "ClinicAgent": {
+      "type": "durable-object",
+      "storage": "sqlite",
+      "container": "clinic-agent"
+    },
+    "LoginLimiter": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

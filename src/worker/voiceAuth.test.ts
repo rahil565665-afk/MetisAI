@@ -1,0 +1,102 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { SignJWT } from 'jose';
+import { agentEnv, bearerToken, canonicalOrigin, validOrigin, verifyVoiceToken } from './voiceAuth.js';
+
+const tenantId = 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4';
+const otherTenantId = '7c62c466-76b8-42ca-93c2-34433dd87059';
+const secretHex = 'ab'.repeat(32);
+const key = new TextEncoder().encode(secretHex);
+
+async function token(claims: Record<string, unknown>, options: { iat?: number; exp?: number; secret?: Uint8Array } = {}): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt(options.iat ?? now)
+    .setExpirationTime(options.exp ?? now + 120)
+    .sign(options.secret ?? key);
+}
+
+const valid = { tenantId, purpose: 'voice', voiceOutputMode: 'native' };
+
+test('accepts a fresh token for the matching clinic', async () => {
+  const claims = await verifyVoiceToken(await token(valid), tenantId, secretHex);
+  assert.equal(claims?.tenantId, tenantId);
+});
+
+test('rejects a token minted for a different clinic', async () => {
+  assert.equal(await verifyVoiceToken(await token({ ...valid, tenantId: otherTenantId }), tenantId, secretHex), null);
+});
+
+test('rejects a token signed with another key', async () => {
+  const forged = await token(valid, { secret: new TextEncoder().encode('cd'.repeat(32)) });
+  assert.equal(await verifyVoiceToken(forged, tenantId, secretHex), null);
+});
+
+test('rejects expired tokens and tokens with a lifetime over three minutes', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(await verifyVoiceToken(await token(valid, { iat: now - 400, exp: now - 100 }), tenantId, secretHex), null);
+  assert.equal(await verifyVoiceToken(await token(valid, { iat: now, exp: now + 3600 }), tenantId, secretHex), null);
+});
+
+test('rejects the wrong purpose, a bad output mode, and non-token input', async () => {
+  assert.equal(await verifyVoiceToken(await token({ ...valid, purpose: 'agent_bridge' }), tenantId, secretHex), null);
+  assert.equal(await verifyVoiceToken(await token({ ...valid, voiceOutputMode: 'other' }), tenantId, secretHex), null);
+  assert.equal(await verifyVoiceToken(null, tenantId, secretHex), null);
+  assert.equal(await verifyVoiceToken('not-a-token', tenantId, secretHex), null);
+});
+
+test('rejects an unsigned (alg none) token', async () => {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const body = Buffer.from(JSON.stringify({ ...valid, iat: now, exp: now + 60 })).toString('base64url');
+  assert.equal(await verifyVoiceToken(`${header}.${body}.`, tenantId, secretHex), null);
+});
+
+test('canonicalOrigin only accepts bare http(s) origins', () => {
+  assert.equal(canonicalOrigin('https://app.example.com'), 'https://app.example.com');
+  assert.equal(canonicalOrigin('https://app.example.com/path'), null);
+  assert.equal(canonicalOrigin('https://user:pw@app.example.com'), null);
+  assert.equal(canonicalOrigin('ftp://app.example.com'), null);
+  assert.equal(canonicalOrigin('not a url'), null);
+  assert.equal(canonicalOrigin(null), null);
+});
+
+test('WebSocket upgrades must carry an exactly matching Origin header', () => {
+  const expected = 'https://app.example.com';
+  const make = (origin?: string) => new Request(`${expected}/agents/${tenantId}/ws`, { headers: origin ? { origin } : {} });
+  assert.equal(validOrigin(make(expected), expected, true), true);
+  assert.equal(validOrigin(make(), expected, true), false);
+  assert.equal(validOrigin(make('https://evil.example.com'), expected, true), false);
+  assert.equal(validOrigin(make('https://app.example.com.evil.com'), expected, true), false);
+});
+
+test('same-origin health GETs may omit Origin, other methods may not', () => {
+  const expected = 'https://app.example.com';
+  assert.equal(validOrigin(new Request(`${expected}/agents/${tenantId}/health`), expected, false), true);
+  assert.equal(validOrigin(new Request(`https://other.example.com/agents/${tenantId}/health`), expected, false), false);
+  assert.equal(validOrigin(new Request(`${expected}/agents/${tenantId}/health`, { method: 'POST' }), expected, false), false);
+});
+
+test('bearerToken extracts only well-formed tokens', () => {
+  const good = 'a'.repeat(40);
+  assert.equal(bearerToken(new Request('https://x.test/', { headers: { authorization: `Bearer ${good}` } })), good);
+  assert.equal(bearerToken(new Request('https://x.test/', { headers: { authorization: 'Bearer short' } })), null);
+  assert.equal(bearerToken(new Request('https://x.test/')), null);
+});
+
+test('the Container environment never includes central or Twilio secrets', () => {
+  const env = agentEnv(tenantId, secretHex, 'https://app.example.com', 'native', {
+    geminiApiKey: 'gemini-test',
+    cartesiaApiKey: 'cartesia-test',
+    calcomApiKey: 'calcom-test',
+    twilioAccountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    twilioAuthToken: 'twilio-auth-token-test',
+    twilioPhoneNumber: '+15555550123',
+  });
+  assert.equal(env.GEMINI_API_KEY, 'gemini-test');
+  assert.equal(env.TWILIO_ENABLED, 'false');
+  assert.equal(env.TENANT_ID, tenantId);
+  const keys = Object.keys(env);
+  assert.ok(!keys.some((name) => /SUPABASE|TWILIO_(ACCOUNT|AUTH|PHONE)/.test(name)), `unexpected variables: ${keys.join(', ')}`);
+});

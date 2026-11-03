@@ -8,7 +8,7 @@ const VoiceTester = React.lazy(() => import('./VoiceTester.js').then((module) =>
 
 type Page = 'overview' | 'voice' | 'clinic' | 'integrations' | 'calls';
 type ExtendedCompany = Company;
-type DeploymentSnapshot = { provisioned: boolean | null; runtimeReady: boolean | null; status: string; error: string };
+type DeploymentSnapshot = { provisioned: boolean | null; inCall: boolean | null; status: string; error: string };
 type UsageSummary = { calls: number; appointments: number; escalationCount: number; talkSeconds: number; periodStart: string };
 
 const shortName = (name: string) => name.split(' ').slice(0, 2).map((word) => word[0]).join('').toUpperCase();
@@ -17,13 +17,14 @@ const firstBoolean = (source: Record<string, unknown>, names: string[]): boolean
   for (const name of names) if (typeof source[name] === 'boolean') return source[name] as boolean;
   return null;
 };
-const containerStateLabel = (status: string, runtimeReady: boolean | null) => {
-  const value = status.toLowerCase();
-  if (value === 'not_configured') return 'Not configured';
-  if (/(asleep|sleeping|suspended|stopped)/.test(value)) return 'Asleep';
-  if (/(waking|starting|booting|pending)/.test(value)) return 'Waking';
-  if (runtimeReady === true || /(awake|ready|healthy|running)/.test(value)) return 'Awake';
-  return status;
+const agentStateLabel = (status: string) => {
+  switch (status.toLowerCase()) {
+    case 'idle': return 'Idle · ready for a voice test';
+    case 'in_call': return 'In a call';
+    case 'not_provisioned': return 'Not provisioned';
+    case 'unavailable': return 'Unavailable here';
+    default: return status;
+  }
 };
 
 export function App() {
@@ -80,8 +81,8 @@ export function App() {
 
   async function createTenant(input: {
     name: string; slug: string; timezone: string;
-    receptionist_config: { greeting: string; knowledge_base: string; voice_output_mode: 'native' | 'cartesia' };
-    integrations: { geminiApiKey: string; cartesiaApiKey: string; cartesiaVoiceId: string; calcomApiKey: string; calcomEventTypeId: number | null; calcomEventTypeSlug: string; calcomUsername: string; calcomTeamSlug: string };
+    receptionist_config: { greeting: string; knowledge_base: string };
+    integrations: { geminiApiKey: string; calcomApiKey: string; calcomEventTypeId: number | null; calcomEventTypeSlug: string; calcomUsername: string; calcomTeamSlug: string };
   }) {
     const created = await api.createTenant(input);
     setTenants((current) => [created, ...current]);
@@ -105,8 +106,7 @@ export function App() {
     { id: 'integrations', label: 'Integrations', icon: SlidersHorizontal },
     { id: 'calls', label: 'Call activity', icon: Activity },
   ];
-  const extendedActive = active as ExtendedCompany | null;
-  const voiceTenant = extendedActive ? { ...extendedActive, agentUrl: `${window.location.origin}/agents/${extendedActive.id}` } as Company : null;
+  const voiceTenant: Company | null = active;
 
   return <div className="app-shell">
     <aside className={`sidebar ${navOpen ? '' : 'sidebar-collapsed'}`}>
@@ -121,7 +121,7 @@ export function App() {
         <div className="page-heading"><div><div className="eyebrow">{page === 'voice' ? 'BROWSER AUDIO · NO PHONE LINE' : 'MULTI-TENANT RECEPTION'}</div><h1>{pageTitle[page]}</h1><p>{page === 'overview' ? 'A clear view of each clinic’s service configuration and runtime readiness.' : page === 'voice' ? 'Test the receptionist with your microphone before connecting a phone line.' : page === 'clinic' ? 'Tune the greeting, clinic details, and caller guidance.' : page === 'integrations' ? 'Connect provider accounts without exposing credentials to the browser.' : 'Recent calls, handoff requests, and assistant activity.'}</p></div><div className="heading-actions">{user.isPlatformAdmin && <button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button>}</div></div>
         {error && <div className="alert error inline-alert">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
         {active && <div className="tenant-context"><div className="tenant-monogram">{shortName(active.name)}</div><div className="tenant-context-name"><span>ACTIVE CLINIC</span><strong>{active.name}</strong></div><div className="tenant-switcher"><select aria-label="Choose active clinic" value={active.id} onChange={(event) => setActiveId(event.target.value)}>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select><ChevronDown size={14} /></div><span className={`pill ${active.is_active ? 'active-pill' : 'paused-pill'}`}><i />{active.is_active ? 'ACTIVE' : 'PAUSED'}</span></div>}
-        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Stethoscope size={22} /></div><h2>Create your first clinic agent</h2><p>Each clinic agent is served through its Cloudflare clinic Container and agent process.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button></div>}
+        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Stethoscope size={22} /></div><h2>Create your first clinic agent</h2><p>Each clinic gets its own voice agent, running on Cloudflare and answering through Gemini Live.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button></div>}
         {active && page === 'overview' && <Overview tenant={active as ExtendedCompany} go={setPage} canManage={user.isPlatformAdmin} onUpdate={(next) => setTenants((items) => items.map((item) => item.id === next.id ? next : item))} />}
         {active && page === 'voice' && voiceTenant && <React.Suspense fallback={<div className="loading-screen"><div className="spinner" /><span>Loading voice test tools</span></div>}><VoiceTester tenant={voiceTenant} /></React.Suspense>}
         {active && page === 'clinic' && <ClinicSetup tenant={active} onUpdate={(next) => setTenants((items) => items.map((item) => item.id === next.id ? next : item))} />}
@@ -139,7 +139,7 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageLoading, setUsageLoading] = useState(true);
   const [usageError, setUsageError] = useState('');
-  const [deployment, setDeployment] = useState<DeploymentSnapshot>({ provisioned: null, runtimeReady: null, status: 'Not reported', error: '' });
+  const [deployment, setDeployment] = useState<DeploymentSnapshot>({ provisioned: null, inCall: null, status: 'Not reported', error: '' });
   const [refreshing, setRefreshing] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleNotice, setLifecycleNotice] = useState('');
@@ -152,13 +152,13 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
       const error = typeof data.error === 'string' ? data.error : typeof data.message === 'string' && data.ok === false ? data.message : '';
       setDeployment({
         provisioned: firstBoolean(data, ['provisioned', 'configured', 'serviceConfigured']),
-        runtimeReady: firstBoolean(data, ['runtimeReady', 'runtime_ready', 'ready', 'healthy']),
+        inCall: firstBoolean(data, ['inCall']),
         status,
         error,
       });
       if (isRecord(data.tenant)) onUpdate(data.tenant as unknown as Company);
     } catch (cause) {
-      setDeployment((current) => ({ ...current, error: cause instanceof Error ? cause.message : 'Could not refresh clinic Container status.' }));
+      setDeployment((current) => ({ ...current, error: cause instanceof Error ? cause.message : 'Could not refresh the voice agent status.' }));
     } finally { setRefreshing(false); }
   }
   useEffect(() => {
@@ -177,31 +177,30 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
     });
     return () => { current = false; };
   }, [tenant.id]);
-  async function resetAgent() {
+  async function endCall() {
     setLifecycleBusy(true); setLifecycleNotice('');
     try {
-      await api.redeploy(tenant.id);
-      setDeployment((current) => ({ ...current, runtimeReady: null, status: 'Restart requested · takes effect on next test', error: '' }));
-      setLifecycleNotice('Agent process reset/restart requested. It takes effect the next time you start a user test.');
+      const result = await api.endCall(tenant.id);
+      setLifecycleNotice(result.message);
+      await refreshDeployment();
     } catch (cause) {
-      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not request an agent process reset/restart.');
+      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not end the call in progress.');
     } finally { setLifecycleBusy(false); }
   }
   async function removeAgent() {
-    if (!window.confirm(`Remove the provisioned agent process for ${tenant.name}? This removes the clinic agent provisioning and its agent-specific configuration, but preserves the clinic profile and saved call and appointment history.`)) return;
+    if (!window.confirm(`Remove the voice agent for ${tenant.name}? This removes the clinic agent provisioning and its agent-specific configuration, but preserves the clinic profile and saved call and appointment history.`)) return;
     setLifecycleBusy(true); setLifecycleNotice('');
     try {
       const result = await api.deleteAgent(tenant.id);
       onUpdate(result.tenant);
-      setDeployment({ provisioned: false, runtimeReady: null, status: 'Not provisioned', error: '' });
+      setDeployment({ provisioned: false, inCall: null, status: 'Not provisioned', error: '' });
       setLifecycleNotice('Clinic agent removed. The clinic profile and saved call and appointment history are preserved.');
     } catch (cause) {
-      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not remove the clinic agent process.');
+      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not remove the clinic agent.');
     } finally { setLifecycleBusy(false); }
   }
   const checks = [
     { id: 'gemini', label: 'Gemini Live', value: integrations.gemini?.configured },
-    { id: 'cartesia', label: 'Cartesia voice', value: integrations.cartesia?.configured },
     { id: 'calcom', label: 'Cal.com', value: integrations.calcom?.configured },
     { id: 'supabase', label: 'Central Supabase store', value: integrations.supabase?.configured },
   ];
@@ -218,33 +217,32 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
     : 'Last 30 days';
   return <><div className="overview-grid"><section className="panel readiness-panel"><div className="panel-head"><div><div className="eyebrow">SERVICE CONFIGURATION</div><h2>Reception stack</h2></div><div className="readiness-score"><strong>{ready}<small>/4</small></strong><span>CONFIGURED</span></div></div><div className="readiness-list">{checks.map((item) => <div className="readiness-row" key={item.id}><span className={`provider-icon ${item.id}`}><i /></span><span className="provider-name">{item.label}</span><span className={`readiness-state ${item.value ? 'ok' : ''}`}><i />{item.value ? 'Configured' : 'Needs setup'}</span></div>)}</div><button className="text-link" onClick={() => go('integrations')}>Manage provider settings <ChevronRight size={15} /></button></section><section className="panel test-panel"><div className="eyebrow">BROWSER TEST</div><div className="test-visual"><div className="test-orbit"><Mic2 size={24} /></div><div className="test-wave"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div><h2>Try a conversation</h2><p>Check the greeting, audio quality, and escalation flow before phone integration.</p><button className="button secondary" onClick={() => go('voice')}>Open voice test <ChevronRight size={15} /></button></section></div>
     <section className="panel deployment-panel"><div className="panel-head"><div><div className="eyebrow">USAGE SUMMARY</div><h2>Last 30 days</h2></div><span className="mini-badge">{usage ? periodLabel : '30-day period'}</span></div>{usageLoading ? <div className="readiness-list"><div className="readiness-row"><span className="provider-name">Loading clinic usage…</span></div></div> : usageError ? <div className="alert error">{usageError}</div> : usage && usage.calls === 0 && usage.appointments === 0 && usage.escalationCount === 0 && usage.talkSeconds === 0 ? <div className="panel empty-activity"><CalendarDays size={20} /><span>No usage recorded for this period.</span></div> : usage ? <div className="readiness-list"><div className="readiness-row"><span className="provider-name">Calls</span><span className="readiness-state">{usage.calls.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Appointments</span><span className="readiness-state">{usage.appointments.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Handoffs</span><span className="readiness-state">{usage.escalationCount.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Talk time</span><span className="readiness-state">{talkTime(usage.talkSeconds)}</span></div></div> : null}</section>
-    <section className="panel deployment-panel"><div className="panel-head"><div><div className="eyebrow">CLOUDFLARE CLINIC CONTAINER</div><h2>Agent process status</h2></div><button className="button secondary" onClick={() => void refreshDeployment()} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh status'}</button></div><div className="readiness-list"><div className="readiness-row"><span className="provider-name">Agent provisioned</span><span className={`readiness-state ${deployment.provisioned ? 'ok' : ''}`}><i />{yesNo(deployment.provisioned)}</span></div><div className="readiness-row"><span className="provider-name">Container ready now</span><span className={`readiness-state ${deployment.runtimeReady ? 'ok' : ''}`}><i />{yesNo(deployment.runtimeReady)}</span></div><div className="readiness-row"><span className="provider-name">Container state</span><span className="readiness-state">{containerStateLabel(deployment.status, deployment.runtimeReady)}</span></div></div><div className="privacy-note"><ShieldCheck size={16} /><span>A provisioned clinic Container may be asleep between tests. Starting a user test sends one wake request; the active WebSocket carries the session without a background pinger.</span></div>{lifecycleNotice && <div className="alert">{lifecycleNotice}</div>}{canManage && <div className="modal-actions"><button className="button secondary" onClick={() => void resetAgent()} disabled={lifecycleBusy}>{lifecycleBusy ? 'Working…' : 'Reset/restart agent process'}</button><button className="button secondary" onClick={() => void removeAgent()} disabled={lifecycleBusy}>Remove clinic agent</button></div>}{deployment.provisioned === false && <div className="alert">No clinic Container agent is provisioned for this clinic. Ask a platform administrator to provision it.</div>}{deployment.error && <div className="alert error">Clinic Container status: {deployment.error}</div>}</section>
+    <section className="panel deployment-panel"><div className="panel-head"><div><div className="eyebrow">CLOUDFLARE VOICE AGENT</div><h2>Agent status</h2></div><button className="button secondary" onClick={() => void refreshDeployment()} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh status'}</button></div><div className="readiness-list"><div className="readiness-row"><span className="provider-name">Agent provisioned</span><span className={`readiness-state ${deployment.provisioned ? 'ok' : ''}`}><i />{yesNo(deployment.provisioned)}</span></div><div className="readiness-row"><span className="provider-name">Call in progress</span><span className={`readiness-state ${deployment.inCall ? 'ok' : ''}`}><i />{yesNo(deployment.inCall)}</span></div><div className="readiness-row"><span className="provider-name">Agent state</span><span className="readiness-state">{agentStateLabel(deployment.status)}</span></div></div><div className="privacy-note"><ShieldCheck size={16} /><span>The agent only runs while a voice test is open and uses nothing between calls. Starting a test opens one WebSocket; there is no background pinger.</span></div>{lifecycleNotice && <div className="alert">{lifecycleNotice}</div>}{canManage && <div className="modal-actions"><button className="button secondary" onClick={() => void endCall()} disabled={lifecycleBusy}>{lifecycleBusy ? 'Working…' : 'End call in progress'}</button><button className="button secondary" onClick={() => void removeAgent()} disabled={lifecycleBusy}>Remove clinic agent</button></div>}{deployment.provisioned === false && <div className="alert">No voice agent is provisioned for this clinic. Add a Gemini API key to provision it.</div>}{deployment.error && <div className="alert error">Voice agent status: {deployment.error}</div>}</section>
     <div className="section-title-row"><div><div className="eyebrow">LATEST ACTIVITY</div><h2>Recent calls</h2></div><button className="text-link" onClick={() => go('calls')}>View call history <ChevronRight size={15} /></button></div><CallTable rows={calls.slice(0, 5)} />{!calls.length && <div className="panel empty-activity"><CalendarDays size={20} /><span>No calls recorded yet. Start a browser voice test to see activity here.</span></div>}</>;
 }
 
 function ClinicSetup({ tenant, onUpdate }: { tenant: Company; onUpdate: (next: Company) => void }) {
   const config = tenant.receptionist_config as Company['receptionist_config'] & { knowledge_base?: string };
   const [greeting, setGreeting] = useState(config?.greeting || 'Thank you for calling. How can I help you today?');
-  const [voiceOutputMode, setVoiceOutputMode] = useState<'native' | 'cartesia'>(config?.voice_output_mode === 'cartesia' ? 'cartesia' : 'native');
   const [knowledgeBase, setKnowledgeBase] = useState(config?.knowledge_base || '');
   const [faqs, setFaqs] = useState((config?.faqs ?? []).map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n'));
   const [timezone, setTimezone] = useState(tenant.timezone);
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
-  useEffect(() => { const nextConfig = tenant.receptionist_config as typeof config; setGreeting(nextConfig?.greeting || 'Thank you for calling. How can I help you today?'); setVoiceOutputMode(nextConfig?.voice_output_mode === 'cartesia' ? 'cartesia' : 'native'); setKnowledgeBase(nextConfig?.knowledge_base || ''); setTimezone(tenant.timezone); setFaqs((nextConfig?.faqs ?? []).map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n')); }, [tenant.id]);
+  useEffect(() => { const nextConfig = tenant.receptionist_config as typeof config; setGreeting(nextConfig?.greeting || 'Thank you for calling. How can I help you today?'); setKnowledgeBase(nextConfig?.knowledge_base || ''); setTimezone(tenant.timezone); setFaqs((nextConfig?.faqs ?? []).map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n')); }, [tenant.id]);
   async function save() {
     setSaving(true); setNotice('');
     try {
       const entries = faqs.split(/\n\s*\n/).map((block) => block.split('\n').map((line) => line.trim()).filter(Boolean)).filter((lines) => lines.length >= 2).map((lines) => ({ question: lines[0], answer: lines.slice(1).join(' ') }));
-      const next = await api.updateTenant(tenant.id, { timezone, receptionist_config: { ...tenant.receptionist_config, greeting, knowledge_base: knowledgeBase, voice_output_mode: voiceOutputMode, faqs: entries, transfer_enabled: true } });
+      const next = await api.updateTenant(tenant.id, { timezone, receptionist_config: { ...tenant.receptionist_config, greeting, knowledge_base: knowledgeBase, faqs: entries, transfer_enabled: true } });
       onUpdate(next); setNotice('Reception settings saved.');
     } catch { setNotice('Could not save reception settings.'); }
     finally { setSaving(false); }
   }
-  return <div className="settings-layout"><section className="panel settings-main"><div className="panel-head"><div><div className="eyebrow">CALLER EXPERIENCE</div><h2>Reception instructions</h2></div><span className="mini-badge">{tenant.business_type.replaceAll('_', ' ')}</span></div><label className="field-label">Opening greeting<span>What callers hear when the assistant answers.</span></label><textarea className="textarea greeting-input" value={greeting} maxLength={800} onChange={(event) => setGreeting(event.target.value)} /><label className="field-label">Speech output<span>Gemini Live is the recommended real-time mode. Cartesia streaming TTS uses the clinic voice ID and requires a Gemini Live model that supports text output.</span></label><select className="select-field" value={voiceOutputMode} onChange={(event) => setVoiceOutputMode(event.target.value as 'native' | 'cartesia')}><option value="native">Gemini Live native speech (recommended)</option><option value="cartesia">Cartesia streaming TTS</option></select><label className="field-label">Knowledge base<span>Clinic policies, services, hours, and other reference information for the receptionist.</span></label><textarea className="textarea faq-input" value={knowledgeBase} onChange={(event) => setKnowledgeBase(event.target.value)} placeholder="Add clinic information the receptionist can use when answering caller questions." /><label className="field-label">Frequently asked questions<span>Separate each entry with a blank line. Put the question first, then the answer.</span></label><textarea className="textarea faq-input" placeholder={'Do you accept walk-ins?\nWe recommend booking ahead so we can find a time that works for you.\n\nWhat are your hours?\nPlease check the clinic website for today’s hours.'} value={faqs} onChange={(event) => setFaqs(event.target.value)} /><div className="settings-footer">{notice && <span className="inline-notice">{notice}</span>}<button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : 'Save reception setup'}</button></div></section><aside className="panel settings-aside"><div className="eyebrow">CLINIC PROFILE</div><h2>{tenant.name}</h2><label className="field-label">Clinic time zone</label><select className="select-field" value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">Eastern Time — New York</option><option value="America/Chicago">Central Time — Chicago</option><option value="America/Denver">Mountain Time — Denver</option><option value="America/Los_Angeles">Pacific Time — Los Angeles</option><option value="UTC">UTC</option></select><div className="privacy-note"><ShieldCheck size={16} /><span>Changes apply to the active clinic. Only clinic managers and owners can edit this setup.</span></div></aside></div>;
+  return <div className="settings-layout"><section className="panel settings-main"><div className="panel-head"><div><div className="eyebrow">CALLER EXPERIENCE</div><h2>Reception instructions</h2></div><span className="mini-badge">{tenant.business_type.replaceAll('_', ' ')}</span></div><label className="field-label">Opening greeting<span>What callers hear when the assistant answers.</span></label><textarea className="textarea greeting-input" value={greeting} maxLength={800} onChange={(event) => setGreeting(event.target.value)} /><label className="field-label">Knowledge base<span>Clinic policies, services, hours, and other reference information for the receptionist.</span></label><textarea className="textarea faq-input" value={knowledgeBase} onChange={(event) => setKnowledgeBase(event.target.value)} placeholder="Add clinic information the receptionist can use when answering caller questions." /><label className="field-label">Frequently asked questions<span>Separate each entry with a blank line. Put the question first, then the answer.</span></label><textarea className="textarea faq-input" placeholder={'Do you accept walk-ins?\nWe recommend booking ahead so we can find a time that works for you.\n\nWhat are your hours?\nPlease check the clinic website for today’s hours.'} value={faqs} onChange={(event) => setFaqs(event.target.value)} /><div className="settings-footer">{notice && <span className="inline-notice">{notice}</span>}<button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : 'Save reception setup'}</button></div></section><aside className="panel settings-aside"><div className="eyebrow">CLINIC PROFILE</div><h2>{tenant.name}</h2><label className="field-label">Clinic time zone</label><select className="select-field" value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">Eastern Time — New York</option><option value="America/Chicago">Central Time — Chicago</option><option value="America/Denver">Mountain Time — Denver</option><option value="America/Los_Angeles">Pacific Time — Los Angeles</option><option value="UTC">UTC</option></select><div className="privacy-note"><ShieldCheck size={16} /><span>Changes apply to the active clinic. Only clinic managers and owners can edit this setup.</span></div></aside></div>;
 }
 
-const emptyProviderFields = () => ({ geminiApiKey: '', cartesiaApiKey: '', cartesiaVoiceId: '', calcomApiKey: '', calcomEventTypeId: '', calcomEventTypeSlug: '', calcomUsername: '', calcomTeamSlug: '', accountSid: '', authToken: '', phoneNumber: '' });
+const emptyProviderFields = () => ({ geminiApiKey: '', calcomApiKey: '', calcomEventTypeId: '', calcomEventTypeSlug: '', calcomUsername: '', calcomTeamSlug: '', accountSid: '', authToken: '', phoneNumber: '' });
 type ProviderFields = ReturnType<typeof emptyProviderFields>;
 
 function Integrations({ tenant }: { tenant: Company }) {
@@ -257,13 +255,11 @@ function Integrations({ tenant }: { tenant: Company }) {
   useEffect(() => { void refresh().catch(() => setNotice('Could not load integration statuses.')); }, [tenant.id]);
   const providerInfo: Record<string, { title: string; description: string }> = {
     gemini: { title: 'Gemini Live', description: 'Realtime conversation, speech understanding, and receptionist tool selection.' },
-    cartesia: { title: 'Cartesia voice', description: 'Streaming speech synthesis and the clinic’s selected receptionist voice.' },
     calcom: { title: 'Cal.com scheduling', description: 'Availability, appointment booking, rescheduling, and cancellations.' },
     twilio: { title: 'Twilio credentials', description: 'Optional credential storage only. Phone transport remains disconnected.' },
   };
   const providers = [
     { id: 'gemini', label: providerInfo.gemini.title },
-    { id: 'cartesia', label: providerInfo.cartesia.title },
     { id: 'calcom', label: providerInfo.calcom.title },
     { id: 'supabase', label: 'Central Supabase store' },
     { id: 'twilio', label: providerInfo.twilio.title },
@@ -273,7 +269,6 @@ function Integrations({ tenant }: { tenant: Company }) {
     let keyFields: string[] = [];
     let payload: Record<string, unknown> = {};
     if (provider === 'gemini') { keyFields = ['geminiApiKey']; payload = { apiKey: fields.geminiApiKey.trim() }; }
-    if (provider === 'cartesia') { keyFields = ['cartesiaApiKey']; payload = { apiKey: fields.cartesiaApiKey.trim(), voiceId: fields.cartesiaVoiceId.trim() }; }
     if (provider === 'calcom') {
       keyFields = ['calcomApiKey'];
       payload = { apiKey: fields.calcomApiKey.trim(), eventTypeId: fields.calcomEventTypeId.trim() ? Number(fields.calcomEventTypeId) : null, eventTypeSlug: fields.calcomEventTypeSlug.trim(), username: fields.calcomUsername.trim(), teamSlug: fields.calcomTeamSlug.trim() };
@@ -284,7 +279,6 @@ function Integrations({ tenant }: { tenant: Company }) {
       const next = { ...fields };
       keyFields.forEach((key) => { next[key as keyof ProviderFields] = ''; });
       if (provider === 'calcom') { next.calcomEventTypeId = ''; next.calcomEventTypeSlug = ''; next.calcomUsername = ''; next.calcomTeamSlug = ''; }
-      if (provider === 'cartesia') next.cartesiaVoiceId = '';
       if (provider === 'twilio') next.phoneNumber = '';
       setFields(next);
       await refresh();
@@ -298,10 +292,9 @@ function Integrations({ tenant }: { tenant: Company }) {
   const textInput = (key: keyof ProviderFields, label: string, placeholder?: string) => <label className="form-field" key={key}><span>{label}</span><input type="text" autoComplete="off" value={fields[key]} onChange={(event) => setFields({ ...fields, [key]: event.target.value })} placeholder={placeholder ?? `Enter ${label.toLowerCase()}`} /></label>;
   return <div className="integrations-layout"><section className="panel provider-list"><div className="panel-head"><div><div className="eyebrow">PROVIDER CONFIGURATION</div><h2>Integration status</h2></div></div>{providers.map((item) => <button key={item.id} className={`integration-row ${provider === item.id ? 'selected' : ''}`} onClick={() => { setProvider(item.id); setNotice(''); }}><span className={`provider-icon ${item.id}`}><i /></span><span className="integration-row-text"><strong>{item.label}</strong><small>{item.id === 'supabase' ? 'Central application database connection.' : providerInfo[item.id]?.description}</small></span><span className={`readiness-state ${isConfigured(item.id) ? 'ok' : ''}`}><i />{isConfigured(item.id) ? 'Configured' : 'Needs setup'}</span></button>)}</section><section className="panel integration-form"><div className="eyebrow">CONFIGURATION</div><h2>{provider === 'supabase' ? 'Central Supabase store' : providerInfo[provider].title}</h2><p>{provider === 'supabase' ? 'Shared central storage status. This connection is managed centrally and is not rotated from this clinic form.' : providerInfo[provider].description}</p>{provider === 'supabase' ? <div className="readiness-row"><span className="provider-name">Central Supabase status</span><span className={`readiness-state ${isConfigured('supabase') ? 'ok' : ''}`}><i />{isConfigured('supabase') ? 'Configured' : 'Needs setup'}</span></div> : <>
     {provider === 'calcom' && <div className="privacy-note"><ShieldCheck size={16} /><span>Use a numeric event type ID, or an event slug with either the owner’s username or the team slug. A slug alone cannot identify a Cal.com calendar.</span></div>}
-    {provider === 'twilio' && <><div className="alert">Credentials only — not connected.</div><div className="privacy-note"><ShieldCheck size={16} /><span>Credentials are stored encrypted in Supabase, but are not passed to a clinic Container. This app does not validate or use them, call Twilio, configure webhooks, route phone calls, or enable the phone transport. Twilio remains disconnected.</span></div></>}
+    {provider === 'twilio' && <><div className="alert">Credentials only — not connected.</div><div className="privacy-note"><ShieldCheck size={16} /><span>Credentials are stored encrypted in Supabase, but are not used by the voice agent. This app does not validate or use them, call Twilio, configure webhooks, route phone calls, or enable the phone transport. Twilio remains disconnected.</span></div></>}
     <form onSubmit={(event) => void save(event)}>
       {provider === 'gemini' && secretInput('geminiApiKey', 'Gemini API key')}
-      {provider === 'cartesia' && <>{secretInput('cartesiaApiKey', 'Cartesia API key')}{textInput('cartesiaVoiceId', 'Cartesia voice ID')}</>}
       {provider === 'calcom' && <>{secretInput('calcomApiKey', 'Cal.com API key')}{textInput('calcomEventTypeId', 'Numeric event type ID', 'e.g. 12345')}{textInput('calcomEventTypeSlug', 'Event type slug', 'Use with a username or team slug')}{textInput('calcomUsername', 'Cal.com username')}{textInput('calcomTeamSlug', 'Cal.com team slug')}</>}
       {provider === 'twilio' && <>{secretInput('accountSid', 'TWILIO_ACCOUNT_SID')}{secretInput('authToken', 'TWILIO_AUTH_TOKEN')}{textInput('phoneNumber', 'TWILIO_PHONE_NUMBER', '+15551234567')}</>}
       <div className="form-bottom">{notice && <span className="inline-notice">{notice}</span>}<button className="button primary" disabled={saving}>{saving ? 'Saving…' : provider === 'twilio' ? 'Save credentials' : 'Save connection'}</button></div>
@@ -320,15 +313,13 @@ function CallTable({ rows }: { rows: any[] }) {
   return <div className="table-wrap"><table><thead><tr><th>SESSION</th><th>TRANSPORT</th><th>STARTED</th><th>STATUS</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><span className="call-id">{row.id.slice(0, 8).toUpperCase()}</span>{row.transfer_requested && <span className="transfer-tag">HANDOFF</span>}</td><td>{row.transport === 'browser' ? 'Browser test' : 'Twilio'}</td><td>{new Date(row.started_at).toLocaleString()}</td><td><span className={`call-state ${row.status === 'completed' ? 'done' : row.status === 'transfer_requested' ? 'attention' : 'live'}`}><i />{row.status.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div>;
 }
 
-function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { name: string; slug: string; timezone: string; receptionist_config: { greeting: string; knowledge_base: string; voice_output_mode: 'native' | 'cartesia' }; integrations: { geminiApiKey: string; cartesiaApiKey: string; cartesiaVoiceId: string; calcomApiKey: string; calcomEventTypeId: number | null; calcomEventTypeSlug: string; calcomUsername: string; calcomTeamSlug: string } }) => Promise<void> }) {
+function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { name: string; slug: string; timezone: string; receptionist_config: { greeting: string; knowledge_base: string }; integrations: { geminiApiKey: string; calcomApiKey: string; calcomEventTypeId: number | null; calcomEventTypeSlug: string; calcomUsername: string; calcomTeamSlug: string } }) => Promise<void> }) {
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [timezone, setTimezone] = useState('America/New_York');
   const [greeting, setGreeting] = useState('Thank you for calling. How can I help you today?');
   const [knowledgeBase, setKnowledgeBase] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState('');
-  const [cartesiaApiKey, setCartesiaApiKey] = useState('');
-  const [cartesiaVoiceId, setCartesiaVoiceId] = useState('');
   const [calcomApiKey, setCalcomApiKey] = useState('');
   const [calcomEventTypeId, setCalcomEventTypeId] = useState('');
   const [calcomEventTypeSlug, setCalcomEventTypeSlug] = useState('');
@@ -347,15 +338,15 @@ function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreat
     try {
       await onCreate({
         name, slug, timezone,
-        receptionist_config: { greeting, knowledge_base: knowledgeBase, voice_output_mode: 'native' },
-        integrations: { geminiApiKey, cartesiaApiKey, cartesiaVoiceId, calcomApiKey, calcomEventTypeId: hasEventId ? Number(calcomEventTypeId.trim()) : null, calcomEventTypeSlug, calcomUsername, calcomTeamSlug },
+        receptionist_config: { greeting, knowledge_base: knowledgeBase },
+        integrations: { geminiApiKey, calcomApiKey, calcomEventTypeId: hasEventId ? Number(calcomEventTypeId.trim()) : null, calcomEventTypeSlug, calcomUsername, calcomTeamSlug },
       });
-      setGeminiApiKey(''); setCartesiaApiKey(''); setCalcomApiKey('');
+      setGeminiApiKey(''); setCalcomApiKey('');
     } catch {
       setError('Could not create the clinic agent. Check the details and try again.');
-      setGeminiApiKey(''); setCartesiaApiKey(''); setCalcomApiKey('');
+      setGeminiApiKey(''); setCalcomApiKey('');
     } finally { setSaving(false); }
   }
   const secretField = (label: string, value: string, change: (value: string) => void) => <label className="form-field"><span>{label}</span><input type="password" autoComplete="new-password" required={label === 'Gemini API key'} value={value} onChange={(event) => change(event.target.value)} placeholder={label === 'Gemini API key' ? 'Required for real-time voice' : 'Optional; configure later'} /></label>;
-  return <div className="modal-backdrop" onClick={onClose}><section className="modal-card" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><div className="eyebrow">NEW CLINIC AGENT</div><h2>Add clinic agent</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><p>Sets up a clinic-specific Container using the shared codebase. It starts on the first user-initiated voice test and may sleep between tests. Provider secrets are submitted to the server and never prefilled in this form.</p>{error && <div className="alert error">{error}</div>}<form onSubmit={(event) => void submit(event)}><label className="form-field"><span>Clinic name</span><input required maxLength={160} value={name} onChange={(event) => changeName(event.target.value)} placeholder="e.g. Northside Dental" /></label><label className="form-field"><span>Service slug</span><input required value={slug} onChange={(event) => setSlug(event.target.value)} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="northside-dental" /></label><label className="form-field"><span>Time zone</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">America/New_York</option><option value="America/Chicago">America/Chicago</option><option value="America/Denver">America/Denver</option><option value="America/Los_Angeles">America/Los_Angeles</option><option value="UTC">UTC</option></select></label><label className="form-field"><span>Receptionist greeting</span><textarea required className="textarea" value={greeting} onChange={(event) => setGreeting(event.target.value)} /></label><label className="form-field"><span>Knowledge-base text</span><textarea required className="textarea" value={knowledgeBase} onChange={(event) => setKnowledgeBase(event.target.value)} placeholder="Clinic information, policies, services, and hours" /></label><div className="eyebrow">PROVIDER CREDENTIALS</div><div className="privacy-note"><ShieldCheck size={16} /><span>A Gemini API key is required. Cartesia and Cal.com can be added later.</span></div>{secretField('Gemini API key', geminiApiKey, setGeminiApiKey)}{secretField('Cartesia API key', cartesiaApiKey, setCartesiaApiKey)}<label className="form-field"><span>Cartesia voice ID</span><input value={cartesiaVoiceId} onChange={(event) => setCartesiaVoiceId(event.target.value)} placeholder="Optional; configure in Provider connections later" /></label>{secretField('Cal.com API key', calcomApiKey, setCalcomApiKey)}<div className="privacy-note"><ShieldCheck size={16} /><span>Provide either a numeric event type ID, or an event slug plus a Cal.com username or team slug. You may leave calendar selectors blank and add them later.</span></div><label className="form-field"><span>Numeric Cal.com event type ID</span><input inputMode="numeric" value={calcomEventTypeId} onChange={(event) => setCalcomEventTypeId(event.target.value)} placeholder="Use this OR the slug fields below" /></label><label className="form-field"><span>Cal.com event slug</span><input value={calcomEventTypeSlug} onChange={(event) => setCalcomEventTypeSlug(event.target.value)} /></label><label className="form-field"><span>Cal.com username</span><input value={calcomUsername} onChange={(event) => setCalcomUsername(event.target.value)} /></label><label className="form-field"><span>Cal.com team slug</span><input value={calcomTeamSlug} onChange={(event) => setCalcomTeamSlug(event.target.value)} /></label><div className="modal-actions"><button type="button" className="button ghost" onClick={onClose}>Cancel</button><button className="button primary" disabled={saving}>{saving ? 'Creating…' : 'Create clinic agent'}</button></div></form></section></div>;
+  return <div className="modal-backdrop" onClick={onClose}><section className="modal-card" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><div className="eyebrow">NEW CLINIC AGENT</div><h2>Add clinic agent</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><p>Sets up a clinic-specific voice agent on Cloudflare. It runs only while a voice test is open. Provider secrets are submitted to the server and never prefilled in this form.</p>{error && <div className="alert error">{error}</div>}<form onSubmit={(event) => void submit(event)}><label className="form-field"><span>Clinic name</span><input required maxLength={160} value={name} onChange={(event) => changeName(event.target.value)} placeholder="e.g. Northside Dental" /></label><label className="form-field"><span>Service slug</span><input required value={slug} onChange={(event) => setSlug(event.target.value)} pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="northside-dental" /></label><label className="form-field"><span>Time zone</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">America/New_York</option><option value="America/Chicago">America/Chicago</option><option value="America/Denver">America/Denver</option><option value="America/Los_Angeles">America/Los_Angeles</option><option value="UTC">UTC</option></select></label><label className="form-field"><span>Receptionist greeting</span><textarea required className="textarea" value={greeting} onChange={(event) => setGreeting(event.target.value)} /></label><label className="form-field"><span>Knowledge-base text</span><textarea required className="textarea" value={knowledgeBase} onChange={(event) => setKnowledgeBase(event.target.value)} placeholder="Clinic information, policies, services, and hours" /></label><div className="eyebrow">PROVIDER CREDENTIALS</div><div className="privacy-note"><ShieldCheck size={16} /><span>A Gemini API key is required. Cal.com can be added later.</span></div>{secretField('Gemini API key', geminiApiKey, setGeminiApiKey)}{secretField('Cal.com API key', calcomApiKey, setCalcomApiKey)}<div className="privacy-note"><ShieldCheck size={16} /><span>Provide either a numeric event type ID, or an event slug plus a Cal.com username or team slug. You may leave calendar selectors blank and add them later.</span></div><label className="form-field"><span>Numeric Cal.com event type ID</span><input inputMode="numeric" value={calcomEventTypeId} onChange={(event) => setCalcomEventTypeId(event.target.value)} placeholder="Use this OR the slug fields below" /></label><label className="form-field"><span>Cal.com event slug</span><input value={calcomEventTypeSlug} onChange={(event) => setCalcomEventTypeSlug(event.target.value)} /></label><label className="form-field"><span>Cal.com username</span><input value={calcomUsername} onChange={(event) => setCalcomUsername(event.target.value)} /></label><label className="form-field"><span>Cal.com team slug</span><input value={calcomTeamSlug} onChange={(event) => setCalcomTeamSlug(event.target.value)} /></label><div className="modal-actions"><button type="button" className="button ghost" onClick={onClose}>Cancel</button><button className="button primary" disabled={saving}>{saving ? 'Creating…' : 'Create clinic agent'}</button></div></form></section></div>;
 }

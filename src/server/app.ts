@@ -33,10 +33,9 @@ app.post('/api/auth/login', (req, res, next) => { void login(req, res).catch(nex
 app.post('/api/auth/logout', (req, res, next) => { try { logout(req, res); } catch (error) { next(error); } });
 app.use('/api', (req, _res, next) => {
   // Browser requests are cookie-authenticated, so mutating ones must come from the dashboard's own
-  // origin (CSRF defence). /agent/* routes are called server-to-server by clinic Containers, never
-  // read the session cookie, and authenticate with a short-lived signed bearer token instead.
+  // origin (CSRF defence). Login and logout do their own origin check.
   const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
-  const exempt = req.path === '/auth/login' || req.path === '/auth/logout' || req.path.startsWith('/agent/');
+  const exempt = req.path === '/auth/login' || req.path === '/auth/logout';
   if (mutating && !exempt) {
     try { assertTrustedOrigin(req); } catch (error) { next(error); return; }
   }

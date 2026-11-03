@@ -21,8 +21,6 @@
     "start": "NODE_ENV=development tsx src/server/index.ts"
   },
   "dependencies": {
-    "@pipecat-ai/client-js": "^1.15.0",
-    "@pipecat-ai/websocket-transport": "^1.8.1",
     "@supabase/supabase-js": "^2.118.0",
     "dotenv": "^16.6.1",
     "express": "^5.3.0",

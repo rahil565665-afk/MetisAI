@@ -20,11 +20,9 @@ export interface NewTenantInput {
   name: string;
   slug: string;
   timezone: string;
-  receptionist_config: { greeting: string; knowledge_base: string; voice_output_mode?: 'native' | 'cartesia' };
+  receptionist_config: { greeting: string; knowledge_base: string };
   integrations: {
     geminiApiKey: string;
-    cartesiaApiKey: string;
-    cartesiaVoiceId: string;
     calcomApiKey: string;
     calcomEventTypeId: number | null;
     calcomEventTypeSlug: string;
@@ -51,7 +49,7 @@ export const api = {
   integrations: async (id: string) => (await request<{ integrations: Record<string, IntegrationStatus> }>(`/api/tenants/${encodeURIComponent(id)}/integrations`)).integrations,
   updateIntegration: async (id: string, provider: string, values: Record<string, unknown>) => request<{ ok: boolean; provider: string; message: string }>(`/api/tenants/${encodeURIComponent(id)}/integrations`, { method: 'PUT', body: JSON.stringify({ provider, ...values }) }),
   deploymentStatus: async (id: string) => request<Record<string, unknown>>(`/api/tenants/${encodeURIComponent(id)}/deployment-status`),
-  redeploy: async (id: string) => request<{ ok: boolean; deployId: string | null; message: string }>(`/api/tenants/${encodeURIComponent(id)}/redeploy`, { method: 'POST', body: '{}' }),
+  endCall: async (id: string) => request<{ ok: boolean; ended: boolean; message: string }>(`/api/tenants/${encodeURIComponent(id)}/end-call`, { method: 'POST', body: '{}' }),
   deleteAgent: async (id: string) => request<{ ok: boolean; tenant: Company; message: string }>(`/api/tenants/${encodeURIComponent(id)}/agent`, { method: 'DELETE' }),
   usage: async (id: string) => request<UsageSummary>(`/api/tenants/${encodeURIComponent(id)}/usage`),
   calls: async (id: string) => (await request<{ calls: any[] }>(`/api/tenants/${encodeURIComponent(id)}/calls`)).calls,

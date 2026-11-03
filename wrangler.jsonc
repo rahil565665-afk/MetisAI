@@ -3,6 +3,8 @@
   "name": "dentdesk-console",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-10-29",
+  // Smaller bundle, faster cold start (the free plan allows 1 second of startup time).
+  "minify": true,
   "compatibility_flags": [
     "nodejs_compat",
     "nodejs_compat_populate_process_env"
@@ -25,18 +27,6 @@
       "/agents/*"
     ]
   },
-  "containers": [
-    {
-      "name": "clinic-agent",
-      "scheduling_policy": "durable_object",
-      "images": {
-        "base": {
-          "dockerfile": "./agent/Dockerfile",
-          "build_context": "./agent"
-        }
-      }
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {
@@ -52,8 +42,7 @@
   "exports": {
     "ClinicAgent": {
       "type": "durable-object",
-      "storage": "sqlite",
-      "container": "clinic-agent"
+      "storage": "sqlite"
     },
     "LoginLimiter": {
       "type": "durable-object",

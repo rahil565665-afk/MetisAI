@@ -1,20 +1,15 @@
 import { Router, type Request } from 'express';
-import { decodeJwt, jwtVerify, SignJWT } from 'jose';
+import { SignJWT } from 'jose';
 import { z } from 'zod';
 import { asyncRoute, HttpError, parseBody, UUID_PATTERN } from '../http.js';
 import { requirePlatformAdmin, requireTenantRole, requireUser } from '../auth/authorization.js';
 import { assertTrustedOrigin, login, logout } from '../auth/passcode.js';
 import {
   createCompany,
-  createCallLog,
   getCompany,
   getUsageSummary,
   listCompanies,
   listRecentCalls,
-  recordAppointment,
-  recordReschedule,
-  updateAgentCallLog,
-  updateAppointmentStatus,
   updateCompany,
   updateDeployment,
   updateIntegrationStatus,
@@ -25,7 +20,7 @@ import {
   mergeAndEncryptTenantProviderSecrets,
   type ProviderSecretUpdate,
 } from '../integrations/tenantProviderSecrets.js';
-import { getClinicContainerRuntime } from '../container-runtime.js';
+import { getClinicAgentRuntime } from '../agent-runtime.js';
 import { assertServerConfig, voiceTokenSigningKeyHex } from '../config.js';
 
 export const apiRouter = Router();
@@ -33,7 +28,7 @@ export const apiRouter = Router();
 /**
  * The `companies.render_deployment_status` column predates Cloudflare. It is reused, unchanged,
  * to record whether a clinic voice agent is provisioned: 'live' means the clinic has stored
- * credentials and may start its Container on demand; 'not_created' means it does not.
+ * credentials and may take voice calls; 'not_created' means it does not.
  */
 const PROVISIONED = 'live' as const;
 const NOT_PROVISIONED = 'not_created' as const;
@@ -55,121 +50,17 @@ function configuredStatus(company: ManagedCompany, provider: string): { configur
   return entry ?? { configured: false };
 }
 
-/** Stop a running clinic Container so new credentials apply on its next start. Best effort. */
-async function stopClinicContainer(id: string): Promise<boolean> {
+/** End a clinic's in-progress voice test so changed credentials or status apply. Best effort. */
+async function endClinicCall(id: string): Promise<boolean> {
   try {
-    await getClinicContainerRuntime().stop(id);
-    return true;
+    return await getClinicAgentRuntime().endCall(id);
   } catch {
-    // Local Node development has no Container runtime, and a failed stop only delays the change
-    // until Cloudflare stops the idle Container. Never log provider values here.
-    console.warn('[agent-stop] Could not stop the clinic Container; changes apply when it next starts.');
+    // Local Node development has no voice runtime. A failed stop only means an in-progress call
+    // keeps running until it ends; new calls always read current settings. Never log provider values.
+    console.warn('[agent-end-call] Could not end the clinic call; changes apply to the next call.');
     return false;
   }
 }
-
-async function assertAgentBridge(req: Request): Promise<string> {
-  const authorization = req.header('authorization') ?? '';
-  const match = /^Bearer ([A-Za-z0-9._-]{32,4096})$/.exec(authorization);
-  if (!match) throw new HttpError(401, 'Agent authorization is required.');
-  let tenantIdFromToken = '';
-  try {
-    const unverified = decodeJwt(match[1]!);
-    tenantIdFromToken = typeof unverified.tenantId === 'string' ? unverified.tenantId : '';
-  } catch {
-    throw new HttpError(401, 'Agent authorization is invalid.');
-  }
-  if (!UUID_PATTERN.test(tenantIdFromToken)) throw new HttpError(401, 'Agent authorization is invalid.');
-  try {
-    const { payload } = await jwtVerify(match[1]!, new TextEncoder().encode(voiceTokenSigningKeyHex(tenantIdFromToken)), {
-      algorithms: ['HS256'],
-      requiredClaims: ['exp', 'iat', 'tenantId', 'purpose'],
-      maxTokenAge: '2m',
-      clockTolerance: 5,
-    });
-    if (payload.tenantId !== tenantIdFromToken || payload.purpose !== 'agent_bridge') throw new Error('claims');
-  } catch {
-    throw new HttpError(401, 'Agent authorization is invalid or expired.');
-  }
-  return tenantIdFromToken;
-}
-
-const agentAppointmentSchema = z.object({
-  bookingUid: z.string().trim().regex(/^[A-Za-z0-9_-]{6,128}$/),
-  status: z.enum(['accepted', 'pending', 'cancelled', 'rescheduled', 'rejected', 'unknown']),
-  startsAt: z.string().datetime({ offset: true }),
-  endsAt: z.string().datetime({ offset: true }).nullable().optional(),
-  appointmentType: z.string().trim().min(1).max(160),
-  attendeeName: z.string().trim().min(1).max(160),
-  attendeeEmail: z.string().trim().email().max(254).optional(),
-  callId: z.string().uuid().nullable().optional(),
-}).strict();
-
-apiRouter.get('/agent/clinic-config', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const company = await getCompany(id);
-  if (!company.is_active) throw new HttpError(403, 'This clinic agent is inactive.');
-  res.setHeader('Cache-Control', 'no-store');
-  res.json({ id: company.id, receptionist_config: { ...company.receptionist_config, clinic_name: company.name } });
-}));
-
-apiRouter.post('/agent/call-logs', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const callId = await createCallLog(id, null, 'browser');
-  res.status(201).json({ callId });
-}));
-
-apiRouter.patch('/agent/call-logs/:callId', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const callId = typeof req.params.callId === 'string' ? req.params.callId : '';
-  if (!z.string().uuid().safeParse(callId).success) throw new HttpError(400, 'Call identifier is invalid.');
-  const fields = parseBody(z.object({
-    ended_at: z.string().trim().max(40).refine((value) => Number.isFinite(Date.parse(value))).optional(),
-    status: z.enum(['completed', 'error', 'transfer_requested']).optional(),
-    transfer_requested: z.boolean().optional(),
-    transfer_reason: z.string().trim().max(250).nullable().optional(),
-  }).strict().refine((value) => Object.keys(value).length > 0), req.body);
-  await updateAgentCallLog(id, callId, fields);
-  res.json({ ok: true });
-}));
-
-apiRouter.post('/agent/appointments', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const input = parseBody(agentAppointmentSchema, req.body);
-  await recordAppointment({
-    tenantId: id,
-    bookingUid: input.bookingUid,
-    status: input.status,
-    start: input.startsAt,
-    end: input.endsAt ?? undefined,
-    type: input.appointmentType,
-    name: input.attendeeName,
-    email: input.attendeeEmail,
-    callId: input.callId ?? undefined,
-  });
-  res.status(201).json({ ok: true });
-}));
-
-apiRouter.patch('/agent/appointments/:bookingUid', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const bookingUid = typeof req.params.bookingUid === 'string' ? req.params.bookingUid : '';
-  if (!/^[A-Za-z0-9_-]{6,128}$/.test(bookingUid)) throw new HttpError(400, 'Booking identifier is invalid.');
-  const input = parseBody(z.object({ status: z.enum(['accepted', 'pending', 'cancelled', 'rescheduled', 'rejected', 'unknown']) }).strict(), req.body);
-  await updateAppointmentStatus(id, bookingUid, input.status);
-  res.json({ ok: true });
-}));
-
-apiRouter.post('/agent/appointments/reschedule', asyncRoute(async (req, res) => {
-  const id = await assertAgentBridge(req);
-  const input = parseBody(z.object({
-    oldBookingUid: z.string().trim().regex(/^[A-Za-z0-9_-]{6,128}$/),
-    newBookingUid: z.string().trim().regex(/^[A-Za-z0-9_-]{6,128}$/).nullable(),
-    startsAt: z.string().datetime({ offset: true }),
-    callId: z.string().uuid().nullable().optional(),
-  }).strict(), req.body);
-  await recordReschedule(id, input.oldBookingUid, input.newBookingUid ?? undefined, input.startsAt, input.callId ?? undefined);
-  res.json({ ok: true });
-}));
 
 apiRouter.get('/health', (_req, res) => {
   try {
@@ -201,12 +92,9 @@ const createTenantSchema = z.object({
   receptionist_config: z.object({
     greeting: z.string().trim().min(1).max(800),
     knowledge_base: z.string().trim().min(1).max(16000),
-    voice_output_mode: z.enum(['native', 'cartesia']).optional(),
   }).strict(),
   integrations: z.object({
     geminiApiKey: z.string().trim().min(1).max(4096),
-    cartesiaApiKey: z.string().trim().max(4096),
-    cartesiaVoiceId: z.string().trim().max(256),
     calcomApiKey: z.string().trim().max(4096),
     calcomEventTypeId: z.number().int().positive().nullable(),
     calcomEventTypeSlug: z.string().trim().max(160),
@@ -228,16 +116,13 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
 
-  const cartesiaReady = Boolean(integration.cartesiaApiKey && integration.cartesiaVoiceId);
   const calcomSelectorReady = hasEventId || (hasEventSlug && Boolean(integration.calcomUsername || integration.calcomTeamSlug));
   const receptionistConfig: Record<string, unknown> = {
     clinic_name: input.name,
     greeting: input.receptionist_config.greeting,
     knowledge_base: input.receptionist_config.knowledge_base,
-    voice_output_mode: input.receptionist_config.voice_output_mode ?? 'native',
     faqs: [],
     transfer_enabled: true,
-    cartesia: { voice_id: integration.cartesiaVoiceId },
     calcom: {
       event_type_id: integration.calcomEventTypeId,
       event_type_slug: integration.calcomEventTypeSlug || null,
@@ -255,7 +140,6 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
   await updateDeployment(company.id, { render_deployment_status: 'creating' });
   const updatedAt = new Date().toISOString();
   const secrets: ProviderSecretUpdate = { geminiApiKey: integration.geminiApiKey };
-  if (integration.cartesiaApiKey) secrets.cartesiaApiKey = integration.cartesiaApiKey;
   if (integration.calcomApiKey) secrets.calcomApiKey = integration.calcomApiKey;
   try {
     await mergeAndEncryptTenantProviderSecrets(company.id, secrets);
@@ -263,7 +147,6 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
       render_deployment_status: PROVISIONED,
       integration_status: {
         gemini: { configured: true, updatedAt, note: 'Stored encrypted' },
-        cartesia: { configured: cartesiaReady, updatedAt, note: cartesiaReady ? 'API key stored encrypted; voice ID is clinic configuration' : 'Optional; enter an API key and voice ID to enable Cartesia output' },
         calcom: { configured: Boolean(integration.calcomApiKey) && calcomSelectorReady, updatedAt, note: integration.calcomApiKey && calcomSelectorReady ? 'API key stored encrypted; event selector is clinic configuration' : 'Optional; configure an API key and event selector to enable scheduling' },
         supabase: { configured: true, updatedAt, note: 'Central Supabase configuration present' },
         twilio: { configured: false, note: 'Not connected' },
@@ -286,10 +169,8 @@ const receptionistConfigSchema = z.object({
   clinic_name: z.string().trim().max(120).optional(),
   greeting: z.string().trim().min(1).max(800).optional(),
   knowledge_base: z.string().trim().max(16000).optional(),
-  voice_output_mode: z.enum(['native', 'cartesia']).optional(),
   faqs: z.array(z.object({ question: z.string().trim().min(1).max(300), answer: z.string().trim().min(1).max(2000) })).max(50).optional(),
   transfer_enabled: z.boolean().optional(),
-  cartesia: z.object({ voice_id: z.string().trim().max(256).nullable().optional() }).optional(),
   calcom: z.object({
     event_type_id: z.number().int().positive().nullable().optional(),
     event_type_slug: z.string().trim().max(160).nullable().optional(),
@@ -310,8 +191,8 @@ apiRouter.patch('/tenants/:tenantId', asyncRoute(async (req, res) => {
   }).strict();
   const changes = parseBody(schema, req.body);
   const tenant = await updateCompany(id, changes);
-  // Voice mode and clinic status are baked into a running Container's session; restart it so they apply.
-  if (changes.is_active === false || changes.receptionist_config?.voice_output_mode) await stopClinicContainer(id);
+  // Deactivating a clinic ends any call in progress; other changes apply to the next call.
+  if (changes.is_active === false) await endClinicCall(id);
   res.json({ tenant });
 }));
 
@@ -323,7 +204,6 @@ apiRouter.get('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   res.json({
     integrations: {
       gemini: configuredStatus(company, 'gemini'),
-      cartesia: configuredStatus(company, 'cartesia'),
       calcom: configuredStatus(company, 'calcom'),
       twilio: configuredStatus(company, 'twilio'),
       supabase: { configured: centralSupabase, note: 'Managed centrally by the server' },
@@ -332,9 +212,8 @@ apiRouter.get('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
 }));
 
 const integrationUpdateSchema = z.object({
-  provider: z.enum(['gemini', 'cartesia', 'calcom', 'twilio']),
+  provider: z.enum(['gemini', 'calcom', 'twilio']),
   apiKey: z.string().trim().max(4096).optional(),
-  voiceId: z.string().trim().max(256).optional(),
   eventTypeId: z.number().int().positive().nullable().optional(),
   eventTypeSlug: z.string().trim().max(160).optional(),
   username: z.string().trim().max(160).optional(),
@@ -366,11 +245,6 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
     if (!input.apiKey) throw new HttpError(400, 'Enter a Gemini API key.');
     secretUpdate.geminiApiKey = input.apiKey;
     nextStatus = { configured: true, updatedAt, note: 'Stored encrypted' };
-  } else if (input.provider === 'cartesia') {
-    if (input.apiKey) secretUpdate.cartesiaApiKey = input.apiKey;
-    if (input.voiceId) config.cartesia = { ...nestedRecord(config.cartesia), voice_id: input.voiceId };
-    if (!input.apiKey && !input.voiceId) throw new HttpError(400, 'Enter a Cartesia API key or voice ID.');
-    nextStatus = { configured: Boolean(existingStatus.configured || input.apiKey) && Boolean(nestedRecord(config.cartesia).voice_id), updatedAt, note: 'API key stored encrypted; voice ID is clinic configuration' };
   } else if (input.provider === 'calcom') {
     if (input.apiKey) secretUpdate.calcomApiKey = input.apiKey;
     const calcom = nestedRecord(config.calcom);
@@ -410,10 +284,10 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
 
   const secretChanged = Object.keys(secretUpdate).length > 0;
   if (secretChanged) await mergeAndEncryptTenantProviderSecrets(id, secretUpdate);
-  if (input.provider === 'cartesia' || input.provider === 'calcom') await updateCompany(id, { receptionist_config: config });
+  if (input.provider === 'calcom') await updateCompany(id, { receptionist_config: config });
   if (input.provider === 'gemini' && !isProvisioned(company)) await updateDeployment(id, { render_deployment_status: PROVISIONED });
   await updateIntegrationStatus(id, input.provider, nextStatus);
-  if (secretChanged || input.provider === 'cartesia' || input.provider === 'calcom') await stopClinicContainer(id);
+  if (secretChanged || input.provider === 'calcom') await endClinicCall(id);
   res.json({ ok: true, provider: input.provider, message: input.provider === 'twilio'
     ? 'Credentials saved encrypted. Twilio remains disabled; no Twilio API or phone configuration was used.'
     : 'Configuration saved server-side. Secret values are not returned. Changes apply the next time you start a voice test.' });
@@ -424,34 +298,31 @@ apiRouter.get('/tenants/:tenantId/deployment-status', asyncRoute(async (req, res
   await requireTenantRole(req, id);
   const company = await getCompany(id);
   if (!isProvisioned(company)) {
-    return res.json({ provisioned: false, runtimeReady: null, status: 'not_provisioned', message: 'This clinic has no provisioned agent. Add a Gemini API key to provision it.' });
+    return res.json({ provisioned: false, inCall: null, status: 'not_provisioned', message: 'This clinic has no provisioned agent. Add a Gemini API key to provision it.' });
   }
   try {
-    // Read-only: the runtime reports state without starting or waking the Container.
-    const runtime = await getClinicContainerRuntime().status(id);
+    const runtime = await getClinicAgentRuntime().status(id);
     res.json({
       provisioned: true,
-      runtimeReady: runtime.runtimeReady,
+      inCall: runtime.inCall,
       status: runtime.status,
-      message: 'The Container starts only when a voice test is requested and sleeps again after inactivity. Refreshing this panel does not wake it.',
+      message: 'The voice agent runs only while a voice test is open and uses no resources between calls.',
     });
   } catch {
-    res.json({ provisioned: true, runtimeReady: null, status: 'unavailable', message: 'Container status is not available in this environment.' });
+    res.json({ provisioned: true, inCall: null, status: 'unavailable', message: 'Voice agent status is not available in this environment.' });
   }
 }));
 
-apiRouter.post('/tenants/:tenantId/redeploy', asyncRoute(async (req, res) => {
+apiRouter.post('/tenants/:tenantId/end-call', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requirePlatformAdmin(req);
   const company = await getCompany(id);
-  if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent to restart.');
-  const stopped = await stopClinicContainer(id);
+  if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent.');
+  const ended = await endClinicCall(id);
   res.json({
     ok: true,
-    deployId: null,
-    message: stopped
-      ? 'The agent process was reset. It starts fresh the next time you start a voice test.'
-      : 'Reset requested. It applies the next time the agent starts.',
+    ended,
+    message: ended ? 'The call in progress was ended.' : 'No call was in progress.',
   });
 }));
 
@@ -460,11 +331,11 @@ apiRouter.delete('/tenants/:tenantId/agent', asyncRoute(async (req, res) => {
   await requirePlatformAdmin(req);
   const company = await getCompany(id);
   if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent to remove.');
-  await stopClinicContainer(id);
+  await endClinicCall(id);
   await clearTenantProviderSecrets(id);
   await updateDeployment(id, { render_deployment_status: NOT_PROVISIONED });
   const updatedAt = new Date().toISOString();
-  for (const provider of ['gemini', 'cartesia', 'calcom', 'twilio'] as const) {
+  for (const provider of ['gemini', 'calcom', 'twilio'] as const) {
     await updateIntegrationStatus(id, provider, {
       configured: false,
       updatedAt,
@@ -481,11 +352,7 @@ apiRouter.post('/tenants/:tenantId/voice-token', asyncRoute(async (req, res) => 
   const company = await getCompany(id);
   if (!company.is_active) throw new HttpError(409, 'This clinic is inactive.');
   if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned voice agent.');
-  const voiceOutputMode = company.receptionist_config?.voice_output_mode === 'cartesia' ? 'cartesia' : 'native';
-  if (voiceOutputMode === 'cartesia' && !configuredStatus(company, 'cartesia').configured) {
-    throw new HttpError(409, 'Configure the Cartesia API key and voice ID before using Cartesia output.');
-  }
-  const token = await new SignJWT({ tenantId: id, purpose: 'voice', voiceOutputMode })
+  const token = await new SignJWT({ tenantId: id, purpose: 'voice' })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('3m')

@@ -2,7 +2,6 @@ export interface Company {
   id: string;
   slug: string;
   name: string;
-  agentUrl?: string;
   render_service_id?: string | null;
   render_service_url?: string | null;
   render_deployment_status?: 'not_created' | 'creating' | 'building' | 'live' | 'failed' | 'suspended' | null;
@@ -11,7 +10,7 @@ export interface Company {
   business_type: string;
   is_active: boolean;
   timezone: string;
-  receptionist_config: { greeting?: string; knowledge_base?: string; voice_output_mode?: 'native' | 'cartesia'; faqs?: Array<{ question: string; answer: string }>; transfer_enabled?: boolean };
+  receptionist_config: { greeting?: string; knowledge_base?: string; faqs?: Array<{ question: string; answer: string }>; transfer_enabled?: boolean };
 }
 
 export interface SessionUser {
@@ -26,4 +25,4 @@ export interface IntegrationStatus {
   metadata?: Record<string, unknown>;
 }
 
-export type VoiceStatus = 'idle' | 'waking' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'transfer_requested' | 'disconnected' | 'error';
+export type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'transfer_requested' | 'disconnected' | 'error';

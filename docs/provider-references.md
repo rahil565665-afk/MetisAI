@@ -5,19 +5,11 @@ These official provider references inform the server adapters. Confirm the curre
 ## Gemini Live API
 
 - Overview and WebSocket architecture: https://ai.google.dev/gemini-api/docs/live-api
-- Ephemeral tokens for client-to-server connections: https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens
+- Live API WebSocket reference: https://ai.google.dev/api/live
 - Tool use / function-call response: https://ai.google.dev/gemini-api/docs/live-api/tools
 - Audio formats and real-time input: https://ai.google.dev/gemini-api/docs/live-api/capabilities
 
-The current application keeps the Gemini credential server-side and streams browser audio through the Pipecat agent. Gemini Live native audio is the default. Cartesia mode requires Gemini text output; model modality support must be verified for the selected model. Provider credentials being configured is not proof of a successful live session.
-
-## Cartesia
-
-- TTS WebSocket: https://docs.cartesia.ai/api-reference/tts/websocket
-- TTS bytes REST API: https://docs.cartesia.ai/api-reference/tts/bytes
-- Short-lived access tokens: https://docs.cartesia.ai/api-reference/auth/access-token
-
-Cartesia is optional streaming TTS. It requires a Cartesia API key and voice ID, is called from the clinic agent, and is not exposed directly to browser code. The user's actual voice/output should be verified after the agent is deployed.
+Each clinic's Durable Object opens one server-to-server WebSocket to the Live API (`BidiGenerateContent`, API key in the `x-goog-api-key` header) and streams the browser's audio through it, so the Gemini credential never reaches a browser. Input is 16 kHz 16-bit mono PCM; output is 24 kHz. Native-audio speech is the only voice mode. The model and voice are the defaults in `src/worker/voice/gemini.ts` and can be overridden with the `GEMINI_LIVE_MODEL` and `GEMINI_VOICE_NAME` variables. Provider credentials being configured is not proof of a successful live session: model availability depends on the key, and the implementation has not been exercised against the real service yet.
 
 ## Cal.com API v2
 
@@ -28,13 +20,20 @@ Cartesia is optional streaming TTS. It requires a Cartesia API key and voice ID,
 - Reschedule booking: https://cal.com/docs/api-reference/v2/bookings/reschedule-a-booking
 - Cancel booking: https://cal.com/docs/api-reference/v2/bookings/cancel-a-booking
 
-The implementation supports availability lookup, booking, rescheduling and cancellation. It accepts a numeric event type ID or an event slug paired with exactly one owner username or team slug. Booking changes require browser approval. Reschedule/cancel compare the supplied attendee email to the existing Cal.com booking; this is only a basic match, not a clinic-approved identity-verification procedure. Live provider behavior remains unverified until a deployed end-to-end test.
+The implementation (`src/worker/voice/calcom.ts`) supports availability lookup, booking, rescheduling and cancellation. It accepts a numeric event type ID or an event slug paired with exactly one owner username or team slug. Booking changes require browser approval. Reschedule/cancel compare the supplied attendee email to the existing Cal.com booking; this is only a basic match, not a clinic-approved identity-verification procedure. Live provider behavior remains unverified until a deployed end-to-end test.
+
+## Cloudflare
+
+- Workers limits: https://developers.cloudflare.com/workers/platform/limits/
+- Durable Objects pricing and the Free plan: https://developers.cloudflare.com/durable-objects/platform/pricing/
+- Durable Objects WebSockets (and the incoming-message billing ratio): https://developers.cloudflare.com/durable-objects/best-practices/websockets/
+- Workers Builds: https://developers.cloudflare.com/workers/ci-cd/builds/
 
 ## Supabase
 
 - API keys: https://supabase.com/docs/guides/getting-started/api-keys
 - Row Level Security: https://supabase.com/docs/guides/database/postgres/row-level-security
 
-The dashboard server holds the Supabase secret key and enforces tenant scope before database operations. The initial migration enables RLS and revokes direct browser-role access to application tables. Clinic agents do not receive the Supabase secret key; a tenant-scoped signed bridge carries settings and call/appointment metadata.
+The Worker holds the Supabase secret key and enforces tenant scope before database operations; the voice agent's database access is bound to the clinic it serves. The initial migration enables RLS and revokes direct browser-role access to application tables.
 
 See [the Twilio configuration boundary](twilio-transport.md). The current application has no phone transport.

@@ -1,66 +1,100 @@
 import { DurableObject } from 'cloudflare:workers';
 import { getCompany } from '../server/integrations/supabase.js';
 import { voiceTokenSigningKeyHex } from '../server/config.js';
-import { readTenantProviderSecrets, type TenantProviderSecrets } from '../server/integrations/tenantProviderSecrets.js';
-import type { ClinicContainerStatus } from '../server/container-runtime.js';
-import { AGENT_PORT, UUID_PATTERN, agentEnv, bearerToken, validOrigin, verifyVoiceToken } from './voiceAuth.js';
-
-const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
-const HEALTH_ATTEMPTS = 150;
-const HEALTH_INTERVAL_MS = 200;
+import { readTenantProviderSecrets } from '../server/integrations/tenantProviderSecrets.js';
+import type { ClinicAgentStatus } from '../server/agent-runtime.js';
+import { CalComClient, CalComError } from './voice/calcom.js';
+import { normalizeClinicConfig } from './voice/clinicConfig.js';
+import { geminiLiveUrl, geminiSettings } from './voice/gemini.js';
+import {
+  GEMINI_REFUSED,
+  SessionStartError,
+  VoiceSession,
+  type PreparedSession,
+  type VoiceSocket,
+} from './voice/session.js';
+import { supabaseCallStore } from './voice/store.js';
+import { UUID_PATTERN, VOICE_SUBPROTOCOL, bearerToken, subprotocolToken, validOrigin, verifyVoiceToken } from './voiceAuth.js';
 
 export interface ClinicAgentEnv {
   APP_PUBLIC_URL: string;
 }
 
-type ContainerHandle = NonNullable<DurableObjectState['container']>;
-
 function reject(status: number, message: string): Response {
   return new Response(message, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
+/** Test doubles for Google and Cal.com are honoured only in an explicit local development run. */
+function developmentUrl(name: string): string | undefined {
+  if (process.env.NODE_ENV !== 'development') return undefined;
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Open the outbound WebSocket to Gemini Live. The API key travels in a header, never in the URL. */
+async function openGeminiSocket(apiKey: string): Promise<VoiceSocket> {
+  let response: Response;
+  try {
+    response = await fetch(geminiLiveUrl(developmentUrl('GEMINI_LIVE_ORIGIN')), {
+      headers: { Upgrade: 'websocket', 'x-goog-api-key': apiKey },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new SessionStartError('The Gemini Live service could not be reached. Try again shortly.');
+  }
+  const socket = response.webSocket;
+  if (response.status !== 101 || !socket) {
+    await response.body?.cancel().catch(() => undefined);
+    console.error('[clinic-agent] gemini upgrade refused', response.status);
+    throw new SessionStartError(GEMINI_REFUSED);
+  }
+  // Workers deliver binary frames as Blobs unless told otherwise; the session reads ArrayBuffers.
+  socket.binaryType = 'arraybuffer';
+  socket.accept();
+  return socket as unknown as VoiceSocket;
+}
+
 /**
- * One Durable Object (named by clinic UUID) owns one Container running the Pipecat agent.
- * The Container starts only when an authorized voice request reaches this object and is
- * stopped by Cloudflare after a period of inactivity. Nothing here pings or keeps it awake.
+ * One Durable Object (named by clinic UUID) runs that clinic's browser voice test. The browser's
+ * WebSocket terminates here and this object holds the outbound WebSocket to Gemini Live, so a
+ * clinic's call state, credentials and tool calls never share memory with another clinic.
+ * Nothing runs unless an authorized voice request arrives; an idle object is evicted by Cloudflare.
  */
 export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
-  private starting: Promise<void> | undefined;
+  private session: VoiceSession | null = null;
 
-  constructor(ctx: DurableObjectState, env: ClinicAgentEnv) {
-    super(ctx, env);
-    const container = this.ctx.container;
-    if (container?.running) {
-      void this.ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS));
-    }
+  /** Read-only status for the dashboard. */
+  async status(tenantId: string): Promise<ClinicAgentStatus> {
+    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid clinic identifier.');
+    const inCall = this.session?.active ?? false;
+    return { provisioned: true, inCall, status: inCall ? 'in_call' : 'idle' };
   }
 
-  /** Read-only status for the dashboard. Never starts or wakes the Container. */
-  async status(tenantId: string): Promise<ClinicContainerStatus> {
+  /** End an in-progress call, for example because the clinic was deactivated or its credentials changed. */
+  async endCall(tenantId: string): Promise<boolean> {
     if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid clinic identifier.');
-    const running = this.ctx.container?.running ?? false;
-    return { provisioned: true, runtimeReady: running, status: running ? 'running' : 'stopped' };
-  }
-
-  /** Stop immediately so changed credentials take effect on the next voice request. */
-  async stop(tenantId: string): Promise<void> {
-    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid clinic identifier.');
-    const container = this.ctx.container;
-    if (container?.running) await container.destroy('Clinic agent stopped by dashboard request');
+    const session = this.session;
+    if (!session?.active) return false;
+    await session.end('admin');
+    return true;
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const match = /^\/agents\/([^/]+)\/(health|ws)$/.exec(url.pathname);
+    const match = /^\/agents\/([^/]+)\/ws$/.exec(url.pathname);
     if (!match) return reject(404, 'Not found.');
     const tenantId = match[1]!.toLowerCase();
-    const route = match[2]!;
     if (!UUID_PATTERN.test(tenantId)) return reject(400, 'Invalid clinic identifier.');
-    if (route === 'health' && request.method !== 'GET') return reject(405, 'Method not allowed.');
-    if (route === 'ws' && (request.method !== 'GET' || request.headers.get('upgrade')?.toLowerCase() !== 'websocket')) {
+    if (request.method !== 'GET' || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
       return reject(426, 'WebSocket upgrade required.');
     }
-    if (!validOrigin(request, this.env.APP_PUBLIC_URL, route === 'ws')) return reject(403, 'Request Origin is not allowed.');
+    if (!validOrigin(request, this.env.APP_PUBLIC_URL, true)) return reject(403, 'Request Origin is not allowed.');
 
     let signingSecret: string;
     try {
@@ -68,73 +102,57 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     } catch {
       return reject(503, 'Clinic voice authentication is unavailable.');
     }
-    const token = bearerToken(request) ?? url.searchParams.get('token');
-    const claims = await verifyVoiceToken(token, tenantId, signingSecret);
+    const claims = await verifyVoiceToken(subprotocolToken(request) ?? bearerToken(request), tenantId, signingSecret);
     if (!claims) return reject(401, 'A valid clinic voice token is required.');
 
+    // Checked and claimed with no await in between, so two simultaneous requests cannot both start.
+    if (this.session?.active) return reject(409, 'A voice test is already running for this clinic.');
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.binaryType = 'arraybuffer';
+    server.accept();
+
+    const settings = geminiSettings(process.env as Record<string, string | undefined>);
+    const session = new VoiceSession({
+      client: server as unknown as VoiceSocket,
+      prepare: () => this.prepare(tenantId),
+      connectGemini: openGeminiSocket,
+      model: settings.model,
+      voiceName: settings.voiceName,
+    });
+    this.session = session;
+    void session.run().finally(() => {
+      if (this.session === session) this.session = null;
+    });
+
+    // Operational problems from here on are reported over the open socket, because a browser cannot
+    // read the body of a failed WebSocket handshake.
+    return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': VOICE_SUBPROTOCOL } });
+  }
+
+  private async prepare(tenantId: string): Promise<PreparedSession> {
     let company: Awaited<ReturnType<typeof getCompany>>;
-    let secrets: TenantProviderSecrets;
+    let secrets: Awaited<ReturnType<typeof readTenantProviderSecrets>>;
     try {
       [company, secrets] = await Promise.all([getCompany(tenantId), readTenantProviderSecrets(tenantId)]);
     } catch {
-      return reject(503, 'Clinic agent configuration is unavailable.');
+      throw new SessionStartError('Clinic agent configuration is unavailable.');
     }
-    if (company.id.toLowerCase() !== tenantId || !company.is_active) return reject(403, 'This clinic is unavailable.');
-    const configuredMode = company.receptionist_config?.voice_output_mode === 'cartesia' ? 'cartesia' : 'native';
-    if (claims.voiceOutputMode !== configuredMode) return reject(401, 'The clinic voice token is no longer valid.');
-    if (!secrets.geminiApiKey?.trim()) return reject(503, 'The clinic voice service is not configured.');
-    if (configuredMode === 'cartesia' && !secrets.cartesiaApiKey?.trim()) return reject(503, 'The clinic voice service is not configured.');
+    if (company.id.toLowerCase() !== tenantId || !company.is_active) throw new SessionStartError('This clinic is unavailable.');
+    if (company.render_deployment_status !== 'live') throw new SessionStartError('This clinic has no provisioned voice agent.');
+    const geminiApiKey = secrets.geminiApiKey?.trim();
+    if (!geminiApiKey) throw new SessionStartError('The clinic voice service is not configured. Add a Gemini API key.');
 
-    const container = this.ctx.container;
-    if (!container) return reject(503, 'Clinic agent containers are unavailable.');
+    const config = normalizeClinicConfig(company);
+    let cal: CalComClient | null = null;
+    let calError: string | null = null;
     try {
-      await this.startAndWaitForHealth(container, agentEnv(tenantId, signingSecret, this.env.APP_PUBLIC_URL, configuredMode, secrets));
-      const target = new URL(request.url);
-      target.protocol = 'http:';
-      target.host = 'container';
-      target.pathname = route === 'health' ? '/health' : '/ws';
-      // The health route never needs the bearer token inside the container; /ws keeps its query token.
-      if (route === 'health') target.search = '';
-      const forwarded = new Request(target, request);
-      forwarded.headers.delete('host');
-      if (route === 'health') forwarded.headers.delete('authorization');
-      return await container.getTcpPort(AGENT_PORT).fetch(forwarded);
-    } catch {
-      return reject(502, 'Clinic agent could not be reached.');
+      cal = CalComClient.create(config.calcom, secrets.calcomApiKey, { baseUrl: developmentUrl('CALCOM_API_URL') });
+    } catch (error) {
+      calError = error instanceof CalComError ? error.message : 'Cal.com scheduling is not configured';
     }
-  }
-
-  private async startAndWaitForHealth(container: ContainerHandle, startupEnv: Record<string, string>): Promise<void> {
-    this.starting ??= this.startAndWait(container, startupEnv).finally(() => {
-      this.starting = undefined;
-    });
-    await this.starting;
-  }
-
-  private async startAndWait(container: ContainerHandle, startupEnv: Record<string, string>): Promise<void> {
-    if (!container.running) {
-      container.start({
-        image: container.images.base,
-        instance: 'lite',
-        enableInternet: true,
-        env: startupEnv,
-      });
-    }
-    await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
-
-    const port = container.getTcpPort(AGENT_PORT);
-    let lastError: unknown;
-    for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt += 1) {
-      try {
-        const response = await port.fetch('http://container/health', { signal: AbortSignal.timeout(1000) });
-        await response.body?.cancel();
-        if (response.ok) return;
-        lastError = new Error(`Health endpoint returned ${response.status}`);
-      } catch (error) {
-        lastError = error;
-      }
-      await scheduler.wait(HEALTH_INTERVAL_MS);
-    }
-    throw new Error(`Clinic agent did not become ready on port ${AGENT_PORT}.`, { cause: lastError });
+    return { config, geminiApiKey, cal, calError, store: supabaseCallStore(tenantId) };
   }
 }

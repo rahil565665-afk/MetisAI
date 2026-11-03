@@ -1,4 +1,4 @@
-# Copy to .dev.vars for `pnpm dev:worker` (wrangler dev, needs Docker for the clinic agent container).
+# Copy to .dev.vars for `pnpm dev:worker` (wrangler dev; runs the Worker and Durable Objects locally, no Docker needed).
 # Never commit .dev.vars or real values.
 DASHBOARD_ADMIN_PASSCODE=replace-with-a-long-admin-passcode
 DASHBOARD_SESSION_SECRET=replace-with-64-hex-random-key
@@ -6,3 +6,7 @@ TENANT_CREDENTIALS_ENCRYPTION_KEY=replace-with-64-hex-random-key
 APP_PUBLIC_URL=http://localhost:8787
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=replace-with-supabase-secret-key
+
+# Optional: override the Gemini Live model or voice (see docs/provider-references.md).
+# GEMINI_LIVE_MODEL=models/gemini-3.8-live
+# GEMINI_VOICE_NAME=Charon

@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { handleAsNodeRequest } from 'cloudflare:node';
 import { app } from '../server/app.js';
 import { configureLoginRateLimiter } from '../server/auth/passcode.js';
-import { configureClinicContainerRuntime } from '../server/container-runtime.js';
+import { configureClinicAgentRuntime } from '../server/agent-runtime.js';
 import { ClinicAgent } from './clinic-agent.js';
 import { LoginLimiter } from './login-limiter.js';
 import { UUID_PATTERN } from './voiceAuth.js';
@@ -22,9 +22,9 @@ function limiterStub(key: string) {
 }
 
 // Bindings are read lazily inside these callbacks, never at module load.
-configureClinicContainerRuntime({
+configureClinicAgentRuntime({
   status: (tenantId) => agentStub(tenantId).status(tenantId),
-  stop: (tenantId) => agentStub(tenantId).stop(tenantId),
+  endCall: (tenantId) => agentStub(tenantId).endCall(tenantId),
 });
 
 configureLoginRateLimiter({
@@ -42,7 +42,7 @@ export default {
     const { pathname } = new URL(request.url);
 
     if (pathname.startsWith('/agents/')) {
-      const match = /^\/agents\/([^/]+)\/(?:health|ws)$/.exec(pathname);
+      const match = /^\/agents\/([^/]+)\/ws$/.exec(pathname);
       if (!match) return plain(404, 'Not found.');
       const tenantId = match[1]!.toLowerCase();
       if (!UUID_PATTERN.test(tenantId)) return plain(400, 'Invalid clinic identifier.');

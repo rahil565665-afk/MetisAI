@@ -21,7 +21,7 @@ Then copy the **Project URL** and the **secret / service-role key** from *Projec
 ## 2. Create the Worker from this repository
 
 1. Cloudflare dashboard → **Workers & Pages → Create → Import a repository** and choose `rahil565665-afk/MetisAI`, branch `main`.
-2. **Worker name: `dentdesk-console`.** It must match `name` in `wrangler.jsonc`, otherwise Workers Builds reports a name mismatch. (To use another name, change `name` in `wrangler.jsonc` and commit.)
+2. **Worker name: `metisai`.** It must match `name` in `wrangler.jsonc`, otherwise Workers Builds reports a name mismatch. A Worker cannot be renamed, so to use another name, change `name` in `wrangler.jsonc` and commit before the first build.
 3. Build settings:
    - Build command: `pnpm build`
    - Deploy command: `npx wrangler deploy`
@@ -45,7 +45,7 @@ Worker → **Settings → Variables and Secrets → Add**, type **Secret** (use 
 | `TENANT_CREDENTIALS_ENCRYPTION_KEY` | A *different* output of `openssl rand -hex 32`. Store a copy in your password manager. |
 | `SUPABASE_URL` | Your Supabase Project URL. |
 | `SUPABASE_SECRET_KEY` | Your Supabase secret key. |
-| `APP_PUBLIC_URL` | The Worker's exact origin, e.g. `https://dentdesk-console.<your-subdomain>.workers.dev` (or your custom domain). HTTPS, no trailing slash or path. |
+| `APP_PUBLIC_URL` | The Worker's exact origin, e.g. `https://metisai.<your-subdomain>.workers.dev` (or your custom domain). HTTPS, no trailing slash or path. |
 
 Equivalent from a terminal: `npx wrangler secret put DASHBOARD_ADMIN_PASSCODE` (and so on).
 
@@ -86,7 +86,7 @@ Roughly 3,000 call-minutes a day by request count — shared with dashboard use.
 
 | Symptom | Likely cause |
 | --- | --- |
-| Build fails with a name mismatch | The Worker is not named `dentdesk-console` (or `name` in `wrangler.jsonc` was changed without renaming the Worker). |
+| Build fails with a name mismatch | The Worker's name in the dashboard differs from `name` in `wrangler.jsonc` (currently `metisai`). Rename the config value to match, since a Worker cannot be renamed. |
 | Sign-in says the passcode is invalid | `DASHBOARD_ADMIN_PASSCODE` is not set as a Worker secret, or was set as a *build* variable. |
 | Sign-in or saving a clinic returns "server is not configured" | One of the six secrets is missing or malformed (`APP_PUBLIC_URL` with a path, keys not 64 hex characters). |
 | Every state-changing request returns 403 | `APP_PUBLIC_URL` does not exactly match the origin you are browsing. |

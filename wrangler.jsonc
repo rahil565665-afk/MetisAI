@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "dentdesk-console",
+  "name": "metisai",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-10-29",
   // Smaller bundle, faster cold start (the free plan allows 1 second of startup time).

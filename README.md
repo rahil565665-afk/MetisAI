@@ -54,7 +54,7 @@ All values are Cloudflare **Secrets** in production (`.dev.vars` for `pnpm dev:w
 | `DASHBOARD_ADMIN_PASSCODE` | Sign-in passcode, 8–128 characters. |
 | `DASHBOARD_SESSION_SECRET` | 32 random bytes (64 hex). Signs sessions and derives each clinic's voice-token key. |
 | `TENANT_CREDENTIALS_ENCRYPTION_KEY` | 32 random bytes (64 hex). Encrypts saved provider keys (AES-256-GCM). **Back it up** — losing it means re-entering every clinic's keys. |
-| `APP_PUBLIC_URL` | Exact public origin, e.g. `https://dentdesk-console.<you>.workers.dev`. HTTPS, no path. |
+| `APP_PUBLIC_URL` | Exact public origin, e.g. `https://metisai.<you>.workers.dev`. HTTPS, no path. |
 | `SUPABASE_URL` | Supabase project URL. |
 | `SUPABASE_SECRET_KEY` | Supabase service-role / secret key. Server-only. |
 

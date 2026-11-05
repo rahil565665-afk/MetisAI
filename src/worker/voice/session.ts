@@ -14,6 +14,7 @@ import {
   setupMessage,
   textInputMessage,
   toolResponseMessage,
+  safeProviderText,
   type GeminiEvent,
   type ToolCall,
   type ToolResult,
@@ -63,14 +64,23 @@ export interface SessionLimits {
   tickMs: number;
   /** How long to wait for the call-log update when ending. */
   logTimeoutMs: number;
+  /** The person is told this long before the time limit or the idle limit ends the call. */
+  warnMs: number;
+  /** How many times a dropped Gemini connection is re-opened (resuming the same conversation). */
+  maxReconnects: number;
+  /** Base pause between reconnect attempts; grows with each attempt. */
+  reconnectDelayMs: number;
 }
 
 export const DEFAULT_LIMITS: SessionLimits = {
-  maxDurationMs: 10 * 60_000,
-  idleMs: 90_000,
+  maxDurationMs: 30 * 60_000,
+  idleMs: 180_000,
   setupTimeoutMs: 15_000,
   tickMs: 5_000,
   logTimeoutMs: 5_000,
+  warnMs: 30_000,
+  maxReconnects: 3,
+  reconnectDelayMs: 500,
 };
 
 export interface SessionDeps {
@@ -88,6 +98,19 @@ export interface SessionDeps {
 const NORMAL_CLOSE = 1000;
 const SERVICE_CLOSE = 1011;
 export const GEMINI_REFUSED = 'The Gemini Live service refused the connection. Check the clinic\'s Gemini API key and that it has Live API access.';
+const IDLE_NOTICE = 'No one has spoken for a while. The test call will end soon unless someone speaks.';
+const LIMIT_NOTICE = 'This test call is about to reach its time limit. Start a new test call to keep going.';
+const ENDING_NOTICE = 'The voice service will end this session shortly.';
+const RECONNECT_NOTICE = 'The voice connection dropped. Reconnecting…';
+
+/** " (code 1007: reason)" with the service's own wording cleaned up, or nothing if it said nothing. */
+function closeDetail(code: number, reason: string): string {
+  const text = safeProviderText(reason, 120);
+  if (!code && !text) return '';
+  return ` (${code ? `code ${code}` : 'no code'}${text ? `: ${text}` : ''})`;
+}
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * One browser test call: the browser's microphone audio goes to Gemini Live, Gemini's spoken reply
@@ -98,6 +121,20 @@ export class VoiceSession {
   private readonly limits: SessionLimits;
   private readonly now: () => Date;
   private gemini: VoiceSocket | null = null;
+  /** A replacement connection that has been opened but has not yet accepted its setup message. */
+  private pending: VoiceSocket | null = null;
+  private pendingSettled: ((ok: boolean) => void) | null = null;
+  private resumeHandle: string | null = null;
+  private longSession = true;
+  private setupRetried = false;
+  private reconnecting = false;
+  /** Bumped whenever the Gemini connection is replaced, so answers meant for the old one are dropped. */
+  private epoch = 0;
+  private startedAt = Date.now();
+  private warnedIdle = false;
+  private warnedLimit = false;
+  private endingSoon = false;
+  private shownNotice = '';
   private gate: ApprovalGate;
   private prepared: PreparedSession | null = null;
   private callId: string | null = null;
@@ -138,9 +175,8 @@ export class VoiceSession {
   async run(): Promise<void> {
     this.attachClient();
     this.deadlineTimer = setTimeout(() => void this.finish('time_limit'), this.limits.maxDurationMs);
-    this.idleTimer = setInterval(() => {
-      if (Date.now() - this.lastActivity > this.limits.idleMs) void this.finish('idle');
-    }, this.limits.tickMs);
+    this.startedAt = Date.now();
+    this.idleTimer = setInterval(() => this.tick(), this.limits.tickMs);
     try {
       await this.start();
     } catch (error) {
@@ -162,25 +198,42 @@ export class VoiceSession {
     if (this.finished) return;
     this.prepared = prepared;
 
-    const callIdPromise = prepared.store.createCall();
+    const callIdPromise = prepared.store.createCall().catch(() => null);
+    try {
+      await this.openInitial();
+    } finally {
+      this.callId = await callIdPromise;
+    }
+  }
+
+  private setup(resumeHandle: string | null): string {
+    const prepared = this.prepared as PreparedSession;
+    return JSON.stringify(setupMessage({
+      model: this.deps.model,
+      voiceName: this.deps.voiceName,
+      systemInstruction: buildSystemInstruction(prepared.config, this.now()),
+      tools: TOOL_DECLARATIONS,
+      resumeHandle,
+      longSession: this.longSession,
+    }));
+  }
+
+  /** Open the first Gemini connection and send the setup message. Also used for the one fallback retry. */
+  private async openInitial(): Promise<void> {
+    const prepared = this.prepared as PreparedSession;
     const socket = await this.deps.connectGemini(prepared.geminiApiKey);
-    this.callId = await callIdPromise;
     if (this.finished) {
       this.closeQuietly(socket, NORMAL_CLOSE, 'Call ended');
       return;
     }
     this.gemini = socket;
     this.attachGemini(socket);
+    clearTimeout(this.setupTimer);
     this.setupTimer = setTimeout(
       () => void this.finish('service', 'The voice service did not respond in time. Try again.'),
       this.limits.setupTimeoutMs,
     );
-    socket.send(JSON.stringify(setupMessage({
-      model: this.deps.model,
-      voiceName: this.deps.voiceName,
-      systemInstruction: buildSystemInstruction(prepared.config, this.now()),
-      tools: TOOL_DECLARATIONS,
-    })));
+    socket.send(this.setup(null));
   }
 
   // --- browser side -------------------------------------------------------------------------
@@ -245,27 +298,20 @@ export class VoiceSession {
   // --- Gemini side --------------------------------------------------------------------------
 
   private attachGemini(socket: VoiceSocket): void {
-    socket.addEventListener('message', (event) => this.onGeminiMessage(event.data));
-    socket.addEventListener('close', (event) => {
-      if (this.finished) return;
-      console.error('[voice-session] gemini closed', event.code);
-      if (!this.ready) void this.finish('service', GEMINI_REFUSED);
-      else void this.finish('service', event.code === NORMAL_CLOSE ? undefined : 'The voice service disconnected.');
-    });
-    socket.addEventListener('error', () => {
-      if (!this.finished) void this.finish('service', this.ready ? 'The voice service disconnected.' : GEMINI_REFUSED);
-    });
+    socket.addEventListener('message', (event) => this.onGeminiMessage(socket, event.data));
+    socket.addEventListener('close', (event) => this.onGeminiClosed(socket, event.code, event.reason));
+    socket.addEventListener('error', () => this.onGeminiClosed(socket, 0, ''));
   }
 
   private sendGemini(message: Record<string, unknown>): void {
     try {
       this.gemini?.send(JSON.stringify(message));
     } catch {
-      // A failed send means the socket is closing; its close handler ends the session.
+      // A failed send means the socket is closing; its close handler deals with it.
     }
   }
 
-  private onGeminiMessage(data: unknown): void {
+  private onGeminiMessage(socket: VoiceSocket, data: unknown): void {
     if (this.finished) return;
     if (typeof data !== 'string' && !isBinary(data)) {
       this.warnUnsupportedFrame();
@@ -273,8 +319,127 @@ export class VoiceSession {
     }
     for (const event of parseServerMessage(data)) {
       if (this.finished) return;
-      this.onGeminiEvent(event);
+      if (socket === this.pending) {
+        if (event.kind === 'setupComplete') this.promote(socket);
+        else if (event.kind === 'error') this.dropPending(socket);
+      }
+      // Connections that have been replaced or dropped are ignored.
+      if (socket === this.gemini) this.onGeminiEvent(event);
     }
+  }
+
+  private onGeminiClosed(socket: VoiceSocket, code: number, reason: string): void {
+    if (this.finished) return;
+    if (socket === this.pending) {
+      this.dropPending(socket);
+      return;
+    }
+    if (socket !== this.gemini) return;
+    this.gemini = null;
+    console.error('[voice-session] gemini closed', code);
+    if (!this.ready) {
+      this.setupFailed(code, reason);
+      return;
+    }
+    void this.reconnect(`code ${code || 'none'}`, closeDetail(code, reason));
+  }
+
+  /**
+   * The service refused the setup message. The long-call settings are the only optional part of it, so
+   * try once more without them before giving up, and say what the service said.
+   */
+  private setupFailed(code: number, reason: string): void {
+    if (this.longSession && !this.setupRetried) {
+      this.setupRetried = true;
+      this.longSession = false;
+      console.error('[voice-session] retrying setup without long-call settings', code);
+      this.openInitial().catch((error: unknown) => {
+        const message = error instanceof SessionStartError ? error.message : 'The voice session could not be started.';
+        void this.finish('service', message);
+      });
+      return;
+    }
+    void this.finish('service', `${GEMINI_REFUSED}${closeDetail(code, reason)}`);
+  }
+
+  /**
+   * Open a replacement connection that continues the same conversation, then switch to it. Used when the
+   * service announces it is about to end the connection and when the connection drops unexpectedly.
+   */
+  private async reconnect(cause: string, detail = ''): Promise<void> {
+    if (this.reconnecting || this.finished) return;
+    this.reconnecting = true;
+    try {
+      this.updateNotice();
+      for (let attempt = 1; attempt <= this.limits.maxReconnects && !this.finished; attempt += 1) {
+        const handle = this.resumeHandle;
+        if (!handle) break;
+        if (attempt > 1) await pause(this.limits.reconnectDelayMs * attempt);
+        if (this.finished) return;
+        if (await this.openResumed(handle)) return;
+        console.error('[voice-session] reconnect attempt failed', attempt, cause);
+      }
+      if (!this.finished && !this.gemini) {
+        await this.finish('service', `The voice service connection was lost and could not be restored${detail}.`);
+      }
+    } finally {
+      this.reconnecting = false;
+      this.updateNotice();
+    }
+  }
+
+  private async openResumed(handle: string): Promise<boolean> {
+    const prepared = this.prepared;
+    if (!prepared) return false;
+    let socket: VoiceSocket;
+    try {
+      socket = await this.deps.connectGemini(prepared.geminiApiKey);
+    } catch {
+      return false;
+    }
+    if (this.finished) {
+      this.closeQuietly(socket, NORMAL_CLOSE, 'Call ended');
+      return false;
+    }
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => this.dropPending(socket), this.limits.setupTimeoutMs);
+      this.pending = socket;
+      this.pendingSettled = (ok) => { clearTimeout(timer); resolve(ok); };
+      this.attachGemini(socket);
+      try {
+        socket.send(this.setup(handle));
+      } catch {
+        this.dropPending(socket);
+      }
+    });
+  }
+
+  private settlePending(ok: boolean): void {
+    const settled = this.pendingSettled;
+    this.pendingSettled = null;
+    settled?.(ok);
+  }
+
+  private dropPending(socket: VoiceSocket): void {
+    if (this.pending !== socket) return;
+    this.pending = null;
+    this.closeQuietly(socket, NORMAL_CLOSE, 'Replacement failed');
+    this.settlePending(false);
+  }
+
+  /** The replacement accepted its setup: switch over and retire the old connection. */
+  private promote(socket: VoiceSocket): void {
+    const old = this.gemini;
+    this.gemini = socket;
+    this.pending = null;
+    this.epoch += 1;
+    // Anything the old connection was waiting on can no longer be answered.
+    this.gate.denyAll();
+    this.touch();
+    this.settlePending(true);
+    if (old) this.closeQuietly(old, NORMAL_CLOSE, 'Replaced');
+    this.endingSoon = false;
+    this.updateNotice();
   }
 
   private onGeminiEvent(event: GeminiEvent): void {
@@ -311,21 +476,31 @@ export class VoiceSession {
         this.flushTranscript();
         this.send({ type: 'turn_complete' });
         return;
-      case 'toolCall':
-        this.touch();
-        this.toolChain = this.toolChain.then(() => this.handleToolCalls(event.calls)).catch(() => undefined);
+      case 'resumption':
+        if (event.resumable && event.handle) this.resumeHandle = event.handle;
         return;
+      case 'toolCall': {
+        this.touch();
+        const epoch = this.epoch;
+        this.toolChain = this.toolChain.then(() => this.handleToolCalls(event.calls, epoch)).catch(() => undefined);
+        return;
+      }
       case 'toolCancel':
         for (const id of event.ids) this.cancelledCalls.add(id);
         // Tool calls run one at a time, so any pending approval belongs to a cancelled call.
         this.gate.denyAll();
         return;
       case 'goAway':
-        this.send({ type: 'notice', message: 'The voice service will end this session shortly.' });
+        if (this.resumeHandle) {
+          void this.reconnect('goAway');
+        } else {
+          this.endingSoon = true;
+          this.updateNotice();
+        }
         return;
       case 'error':
         console.error('[voice-session] gemini reported an error');
-        void this.finish('service', 'The voice service reported an error.');
+        void this.finish('service', `The voice service reported an error${event.detail ? `: ${event.detail}` : ''}.`);
         return;
     }
   }
@@ -343,7 +518,7 @@ export class VoiceSession {
     if (text.trim()) this.send({ type: 'transcript', role, text, final: true });
   }
 
-  private async handleToolCalls(calls: ToolCall[]): Promise<void> {
+  private async handleToolCalls(calls: ToolCall[], epoch: number): Promise<void> {
     const prepared = this.prepared;
     if (!prepared) return;
     const deps: ToolDeps = {
@@ -357,13 +532,15 @@ export class VoiceSession {
     };
     const results: ToolResult[] = [];
     for (const call of calls) {
-      if (this.finished) return;
+      if (this.finished || epoch !== this.epoch) return;
       if (this.cancelledCalls.has(call.id)) continue;
       const response = await runTool(deps, call.name, call.args);
       // A call the model cancelled (the caller interrupted) gets no answer.
       if (this.finished || this.cancelledCalls.has(call.id)) continue;
       results.push({ id: call.id, name: call.name, response });
     }
+    // The connection was replaced while the tools ran; the new one knows nothing of these calls.
+    if (epoch !== this.epoch) return;
     if (results.length > 0 && !this.finished) {
       this.touch();
       this.sendGemini(toolResponseMessage(results));
@@ -380,6 +557,35 @@ export class VoiceSession {
 
   private touch(): void {
     this.lastActivity = Date.now();
+    if (this.warnedIdle) {
+      this.warnedIdle = false;
+      this.updateNotice();
+    }
+  }
+
+  private tick(): void {
+    const now = Date.now();
+    const quiet = now - this.lastActivity;
+    if (quiet > this.limits.idleMs) {
+      void this.finish('idle');
+      return;
+    }
+    if (!this.warnedLimit && now - this.startedAt > this.limits.maxDurationMs - this.limits.warnMs) this.warnedLimit = true;
+    if (!this.warnedIdle && quiet > this.limits.idleMs - this.limits.warnMs) this.warnedIdle = true;
+    this.updateNotice();
+  }
+
+  /** One banner at a time in the browser; the most urgent applies. An empty message clears it. */
+  private updateNotice(): void {
+    if (this.finished) return;
+    let message = '';
+    if (this.ready && !this.gemini) message = RECONNECT_NOTICE;
+    else if (this.warnedLimit) message = LIMIT_NOTICE;
+    else if (this.endingSoon) message = ENDING_NOTICE;
+    else if (this.warnedIdle) message = IDLE_NOTICE;
+    if (message === this.shownNotice) return;
+    this.shownNotice = message;
+    this.send({ type: 'notice', message });
   }
 
   private closeQuietly(socket: VoiceSocket | null, code: number, reason: string): void {
@@ -396,6 +602,9 @@ export class VoiceSession {
     clearTimeout(this.deadlineTimer);
     clearTimeout(this.setupTimer);
     clearInterval(this.idleTimer);
+    if (this.pending) this.closeQuietly(this.pending, NORMAL_CLOSE, 'Call ended');
+    this.pending = null;
+    this.settlePending(false);
     this.gate.denyAll();
     this.flushTranscript();
     if (failure) this.send({ type: 'error', message: failure });

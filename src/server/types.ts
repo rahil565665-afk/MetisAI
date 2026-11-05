@@ -8,6 +8,23 @@ export interface AppUser {
   is_active: boolean;
 }
 
+/** Whether a clinic's voice agent may take calls: 'live' once it has stored credentials. */
+export type AgentStatus = 'not_created' | 'live' | 'failed';
+
+export interface IntegrationState {
+  configured: boolean;
+  updatedAt?: string;
+  note?: string;
+}
+
+export interface ReceptionistConfig {
+  greeting?: string;
+  faqs?: Array<{ question: string; answer: string }>;
+  transfer_enabled?: boolean;
+  [key: string]: unknown;
+}
+
+/** A clinic as kept in the console's registry. Call history lives in the clinic's own database. */
 export interface Company {
   id: string;
   slug: string;
@@ -15,12 +32,9 @@ export interface Company {
   business_type: string;
   is_active: boolean;
   timezone: string;
-  receptionist_config: {
-    greeting?: string;
-    voice_output_mode?: 'native' | 'cartesia';
-    faqs?: Array<{ question: string; answer: string }>;
-    transfer_enabled?: boolean;
-    [key: string]: unknown;
-  };
-  created_at?: string;
+  receptionist_config: ReceptionistConfig;
+  agent_status: AgentStatus;
+  integration_status: Record<string, IntegrationState>;
+  created_at: string;
+  updated_at: string;
 }

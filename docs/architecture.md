@@ -13,7 +13,8 @@
 | Cal.com client | `src/worker/voice/calcom.ts` | Availability, booking, rescheduling, cancellation, with attendee-identity checks. |
 | Approval gate | `src/worker/voice/approval.ts` | Holds a tool call until the browser approves it; denies on timeout, interruption or disconnect. |
 | `LoginLimiter` Durable Object | `src/worker/login-limiter.ts` | Counts failed sign-ins per client address (hashed). |
-| Database | Supabase | Clinics, call metadata, appointments, encrypted provider keys. |
+| `Registry` Durable Object | `src/worker/registry.ts`, logic in `src/server/registry/core.ts` | The list of clinics and each clinic's encrypted provider keys (one object named `registry`, free SQLite-backed storage). |
+| Clinic database | One Supabase project **per clinic** | That clinic's call metadata and appointments. Credentials come from the clinic's encrypted keys; `supabase/clinic-schema.sql` creates the tables. |
 
 `src/worker/index.ts` routes requests: `/agents/<uuid>/ws` to the clinic's Durable Object, `/api/*` to the Express app, everything else to static assets (single-page-app fallback).
 
@@ -25,7 +26,7 @@
 4. From here problems are reported over the open socket as `{type:"error"}` messages, because a browser cannot read the body of a failed WebSocket handshake. The session loads the clinic and its encrypted keys, opens an outbound WebSocket to Gemini Live (key in an `x-goog-api-key` header), sends the setup message — model, voice, system instruction, five tool declarations — and waits for `setupComplete`.
 5. The session sends `{type:"ready"}` to the browser and asks Gemini to greet the caller. Microphone audio now flows browser → Durable Object → Gemini as binary frames; Gemini's speech flows back the same way, with live transcripts as JSON messages.
 6. When Gemini calls a tool the session validates the arguments. Booking, rescheduling and cancelling first send `approval_request` to the browser and wait for the person to click Approve. Reads (availability) and escalation do not wait.
-7. The call ends when the person hangs up, the browser disconnects, an administrator ends it from the dashboard, Gemini disconnects, it reaches 10 minutes, or 90 seconds pass with no speech. The session denies any open approval, closes both sockets, and marks the call log `completed`, `error` or `transfer_requested`.
+7. The call ends when the person hangs up, the browser disconnects, an administrator ends it from the dashboard, the Gemini connection is lost and cannot be restored, it reaches 30 minutes, or 3 minutes pass with no speech (the browser is warned 30 seconds before either). Gemini limits a connection to about 10 minutes and announces its end with `goAway`; the session asks for resumable sessions with sliding-window context compression, and on `goAway` or an unexpected drop it opens a replacement connection with the latest resumption handle, moves the call across without repeating the greeting, and retires the old connection. If the service refuses the long-call settings the session retries once without them; if reconnecting fails it ends the call with the service's reason. The session denies any open approval, closes both sockets, and marks the call log `completed`, `error` or `transfer_requested`.
 
 ## Trust boundaries
 
@@ -34,18 +35,18 @@
 - **Appointment changes need a human click.** The model cannot approve its own action, spoken agreement is not approval, and an unanswered prompt is a "no". Rescheduling and cancelling re-check attendee identity both before the prompt and after approval.
 - **Per-clinic keys:** voice tokens are signed with `HKDF-SHA256(DASHBOARD_SESSION_SECRET, info = "dentdesk-voice-session-v1", salt = "dentdesk-voice:<tenantId>")`. A token minted for one clinic fails verification for every other clinic.
 - **Stored provider keys:** AES-256-GCM with a fresh random IV per save and authenticated data `dentdesk-provider-secrets:1:<tenantId>`, so a ciphertext copied to another clinic's row will not decrypt.
-- **Isolation:** each clinic's call runs in its own Durable Object, and a call reads only that clinic's row and keys. Database access uses the central key, and every query the voice code makes is scoped by `tenant_id`.
+- **Isolation:** each clinic's call runs in its own Durable Object, and a call reads only that clinic's row and keys. A clinic's database credentials are decrypted only inside its own call or API request, so one clinic's key can never reach another clinic's data, and every query is still scoped by `tenant_id`.
 - **Errors:** provider error text is never forwarded to the browser or the logs; users get fixed, actionable messages and logs carry only a status code or error class.
 
 ## Data
 
-Supabase holds clinic records and settings, integration status (configured / not configured, never values), call logs, appointment lifecycle records and the encrypted provider-key table. Direct browser-role access to application tables is revoked and row-level security is on; only the Worker's secret key reads or writes them. Audio, transcripts, caller identity and conversation history are not persisted.
+The **Registry** holds clinic records and settings, integration status (configured / not configured, never values) and the encrypted provider-key blobs. Each clinic's **own Supabase project** holds its call logs and appointment records; direct browser-role access to those tables is revoked and row-level security is on, so only the clinic's secret key (held encrypted by the Worker) reads or writes them. Audio, transcripts, caller identity and conversation history are not persisted.
 
-`companies.render_deployment_status` stores whether a clinic is provisioned (`live`) or not (`not_created`). The name is historical; see the README.
+When a clinic is added or its database is re-entered, the console test-writes and deletes one call-log row and reads the appointments table, so a wrong key, a wrong project or a missing schema is reported immediately. A clinic whose database later becomes unreachable still takes calls; history is skipped (best-effort, logging only an error class) and the dashboard shows that the database is not connected.
 
 ## Scheduling
 
-Cal.com API v2 with a numeric event-type ID, or an event slug plus exactly one username or team slug. Availability is read-only; booking, rescheduling and cancellation pause until the person approves the exact action in the browser. Rescheduling and cancellation also require the supplied attendee email to match the existing booking — a basic check, not a substitute for a clinic-approved identity-verification procedure.
+Cal.com API v2. The clinic is configured with a pasted event link (`https://cal.com/<user>/<event>` or `https://cal.com/team/<team>/<event>`), which the server turns into an event slug plus the username or team slug, or with a numeric event-type ID (which wins if both are given). When saved, availability for the event is read once to confirm the API key and event; a rejected key or unknown event is refused, a Cal.com outage is not. Availability is read-only; booking, rescheduling and cancellation pause until the person approves the exact action in the browser. Rescheduling and cancellation also require the supplied attendee email to match the existing booking — a basic check, not a substitute for a clinic-approved identity-verification procedure.
 
 ## Free-plan budget
 
@@ -60,7 +61,7 @@ The design avoids anything the Workers Free plan does not include (no Containers
 
 So roughly 3,000 minutes of calls a day by request count and 28 hours by duration, shared with dashboard use — far more than testing needs. Sending audio in 100 ms chunks (rather than 20 ms) is what keeps the request count low. When a limit is exhausted Cloudflare rejects further requests until 00:00 UTC; the console keeps working for anything that has capacity left.
 
-Not measured: the 10 ms CPU limit on dashboard API requests. It cannot be enforced or measured in local development. The work per request is small (a few Supabase calls, one hash or token operation), but it is the first place to look if you see Cloudflare error 1102.
+Not measured: the 10 ms CPU limit on dashboard API requests. It cannot be enforced or measured in local development. The work per request is small (a few calls to the clinic's Supabase, one hash or token operation), but it is the first place to look if you see Cloudflare error 1102.
 
 ## Telephony
 

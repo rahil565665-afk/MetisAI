@@ -13,7 +13,7 @@
     "enabled": true
   },
   // Not a secret. Without it the server would treat the Worker as a local development run.
-  // Everything private (passcode, signing key, Supabase, encryption key, public URL) is set as a
+  // Everything private (passcode, signing key, encryption key, public URL) is set as a
   // Cloudflare Secret instead; secrets survive deploys and are never stored in this file.
   "vars": {
     "NODE_ENV": "production"
@@ -36,6 +36,10 @@
       {
         "name": "LOGIN_LIMITER",
         "class_name": "LoginLimiter"
+      },
+      {
+        "name": "REGISTRY",
+        "class_name": "Registry"
       }
     ]
   },
@@ -45,6 +49,10 @@
       "storage": "sqlite"
     },
     "LoginLimiter": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "Registry": {
       "type": "durable-object",
       "storage": "sqlite"
     }

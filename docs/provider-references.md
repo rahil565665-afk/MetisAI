@@ -34,6 +34,6 @@ The implementation (`src/worker/voice/calcom.ts`) supports availability lookup, 
 - API keys: https://supabase.com/docs/guides/getting-started/api-keys
 - Row Level Security: https://supabase.com/docs/guides/database/postgres/row-level-security
 
-The Worker holds the Supabase secret key and enforces tenant scope before database operations; the voice agent's database access is bound to the clinic it serves. The initial migration enables RLS and revokes direct browser-role access to application tables.
+Each clinic has its own Supabase project. The Worker holds that clinic's secret key encrypted and enforces tenant scope before database operations; the voice agent's database access is bound to the clinic it serves. `supabase/clinic-schema.sql` enables RLS and revokes direct browser-role access to the two application tables.
 
 See [the Twilio configuration boundary](twilio-transport.md). The current application has no phone transport.

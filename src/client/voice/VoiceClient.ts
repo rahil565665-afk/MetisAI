@@ -112,10 +112,15 @@ export class VoiceClient {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       if (!this.closing) {
-        if (!this.ready && !this.failed) this.events.error('The voice agent refused the connection. Check that this clinic is active and try again.');
-        this.failed ||= !this.ready;
+        // The agent always says why a call ends before it closes; reaching here means the connection itself was lost.
+        if (!this.failed) {
+          this.events.error(this.ready
+            ? 'The connection to the voice agent was lost. Check your internet connection and start a new test call.'
+            : 'The voice agent refused the connection. Check that this clinic is active and try again.');
+        }
+        this.failed = true;
         this.teardown();
-        this.setStatus(this.failed ? 'error' : 'disconnected');
+        this.setStatus('error');
       }
     };
     this.speakingPoll = window.setInterval(() => {

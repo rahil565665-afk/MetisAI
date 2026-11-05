@@ -7,32 +7,40 @@ import { assertTrustedOrigin, login, logout } from '../auth/passcode.js';
 import {
   createCompany,
   getCompany,
-  getUsageSummary,
   listCompanies,
-  listRecentCalls,
   updateCompany,
-  updateDeployment,
   updateIntegrationStatus,
-  type ManagedCompany,
-} from '../integrations/supabase.js';
+} from '../registry/index.js';
 import {
   clearTenantProviderSecrets,
   mergeAndEncryptTenantProviderSecrets,
+  readTenantProviderSecrets,
   type ProviderSecretUpdate,
 } from '../integrations/tenantProviderSecrets.js';
+import {
+  checkClinicDatabase,
+  cleanSupabaseKey,
+  clinicDatabase,
+  connectClinicDatabase,
+  getUsageSummary,
+  listRecentCalls,
+  normalizeSupabaseUrl,
+} from '../integrations/clinicDatabase.js';
+import { parseCalSelector, selectorIsComplete, type CalSelector } from '../integrations/calcomSelector.js';
+import { checkCalCom, checkGeminiKey } from '../integrations/providerChecks.js';
+import type { Company, IntegrationState } from '../types.js';
 import { getClinicAgentRuntime } from '../agent-runtime.js';
 import { assertServerConfig, voiceTokenSigningKeyHex } from '../config.js';
 
 export const apiRouter = Router();
 
-/**
- * The `companies.render_deployment_status` column predates Cloudflare. It is reused, unchanged,
- * to record whether a clinic voice agent is provisioned: 'live' means the clinic has stored
- * credentials and may take voice calls; 'not_created' means it does not.
- */
-const PROVISIONED = 'live' as const;
-const NOT_PROVISIONED = 'not_created' as const;
-const isProvisioned = (company: ManagedCompany): boolean => company.render_deployment_status === PROVISIONED;
+/** A clinic is provisioned ('live') once it has stored credentials and may take voice calls. */
+const isProvisioned = (company: Company): boolean => company.agent_status === 'live';
+
+const GEMINI_REJECTED = 'Google rejected that Gemini API key. Create a key in Google AI Studio and check you copied all of it.';
+const CALCOM_REJECTED = 'Cal.com rejected that API key. Create a new API key in Cal.com (Settings → Developer → API keys) and paste it again.';
+const CALCOM_NOT_FOUND = 'Cal.com could not find that event. Check the event type ID (it is the number in the event’s address in Cal.com) or the link.';
+const DATABASE_UNREADABLE = 'Could not read this clinic’s Supabase database. Check the connection under Integrations.';
 
 function tenantId(req: Request): string {
   const raw = req.params.tenantId;
@@ -45,7 +53,7 @@ function nestedRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function configuredStatus(company: ManagedCompany, provider: string): { configured: boolean; updatedAt?: string; note?: string } {
+function configuredStatus(company: Company, provider: string): IntegrationState {
   const entry = company.integration_status?.[provider];
   return entry ?? { configured: false };
 }
@@ -81,25 +89,25 @@ apiRouter.post('/auth/login', asyncRoute(async (req, res) => { await login(req, 
 apiRouter.post('/auth/logout', asyncRoute(async (req, res) => { logout(req, res); }));
 
 apiRouter.get('/tenants', asyncRoute(async (req, res) => {
-  const user = await requirePlatformAdmin(req);
-  res.json({ tenants: await listCompanies(user) });
+  await requirePlatformAdmin(req);
+  res.json({ tenants: await listCompanies() });
 }));
 
 const createTenantSchema = z.object({
   name: z.string().trim().min(1).max(160),
-  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
+  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'The service slug may use only lowercase letters, numbers and single dashes.').max(80),
   timezone: z.string().trim().min(1).max(64),
   receptionist_config: z.object({
     greeting: z.string().trim().min(1).max(800),
     knowledge_base: z.string().trim().min(1).max(16000),
   }).strict(),
   integrations: z.object({
-    geminiApiKey: z.string().trim().min(1).max(4096),
-    calcomApiKey: z.string().trim().max(4096),
-    calcomEventTypeId: z.number().int().positive().nullable(),
-    calcomEventTypeSlug: z.string().trim().max(160),
-    calcomUsername: z.string().trim().max(160),
-    calcomTeamSlug: z.string().trim().max(160),
+    geminiApiKey: z.string().trim().min(1, 'Enter the clinic’s Gemini API key.').max(4096),
+    supabaseUrl: z.string().trim().min(1, 'Enter the clinic’s Supabase project URL.').max(300),
+    supabaseSecretKey: z.string().trim().min(1, 'Enter the clinic’s Supabase secret key.').max(2048),
+    calcomApiKey: z.string().trim().max(4096).optional(),
+    calcomEventTypeId: z.number().int().positive().nullable().optional(),
+    calcomEventLink: z.string().trim().max(300).optional(),
   }).strict(),
 }).strict();
 
@@ -107,54 +115,58 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
   await requirePlatformAdmin(req);
   const input = parseBody(createTenantSchema, req.body);
   const integration = input.integrations;
-  const hasEventId = integration.calcomEventTypeId !== null;
-  const hasEventSlug = Boolean(integration.calcomEventTypeSlug);
-  if ((hasEventId && hasEventSlug) || (hasEventSlug && Boolean(integration.calcomUsername) === Boolean(integration.calcomTeamSlug))) {
-    throw new HttpError(400, 'Use a numeric Cal.com event type ID, or a slug with exactly one username or team slug.');
-  }
   try { assertServerConfig(); } catch (error) {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
 
-  const calcomSelectorReady = hasEventId || (hasEventSlug && Boolean(integration.calcomUsername || integration.calcomTeamSlug));
+  // Check everything that can be wrong before anything is stored, so a failed attempt leaves nothing behind.
+  const calcom = parseCalSelector({ eventTypeId: integration.calcomEventTypeId, eventLink: integration.calcomEventLink });
+  const supabaseUrl = normalizeSupabaseUrl(integration.supabaseUrl);
+  const supabaseSecretKey = cleanSupabaseKey(integration.supabaseSecretKey);
+  const id = crypto.randomUUID();
+  await checkClinicDatabase(connectClinicDatabase(supabaseUrl, supabaseSecretKey), id);
+  if (await checkGeminiKey(integration.geminiApiKey) === 'rejected') throw new HttpError(400, GEMINI_REJECTED);
+  const calcomKey = integration.calcomApiKey || '';
+  if (calcomKey && calcom) {
+    const result = await checkCalCom(calcom.selector, calcomKey);
+    if (result === 'rejected') throw new HttpError(400, CALCOM_REJECTED);
+    if (result === 'not_found') throw new HttpError(400, CALCOM_NOT_FOUND);
+  }
+
   const receptionistConfig: Record<string, unknown> = {
     clinic_name: input.name,
     greeting: input.receptionist_config.greeting,
     knowledge_base: input.receptionist_config.knowledge_base,
     faqs: [],
     transfer_enabled: true,
-    calcom: {
-      event_type_id: integration.calcomEventTypeId,
-      event_type_slug: integration.calcomEventTypeSlug || null,
-      username: integration.calcomUsername || null,
-      team_slug: integration.calcomTeamSlug || null,
-    },
+    calcom: calcom?.selector ?? { event_type_id: null, event_type_slug: null, username: null, team_slug: null },
   };
   const company = await createCompany({
+    id,
     slug: input.slug,
     name: input.name,
-    businessType: 'dental_clinic',
+    business_type: 'dental_clinic',
     timezone: input.timezone,
-    receptionistConfig,
+    receptionist_config: receptionistConfig,
   });
-  await updateDeployment(company.id, { render_deployment_status: 'creating' });
   const updatedAt = new Date().toISOString();
-  const secrets: ProviderSecretUpdate = { geminiApiKey: integration.geminiApiKey };
-  if (integration.calcomApiKey) secrets.calcomApiKey = integration.calcomApiKey;
+  const secrets: ProviderSecretUpdate = { geminiApiKey: integration.geminiApiKey, supabaseUrl, supabaseSecretKey };
+  if (calcomKey) secrets.calcomApiKey = calcomKey;
   try {
     await mergeAndEncryptTenantProviderSecrets(company.id, secrets);
+    const calcomReady = Boolean(calcomKey) && selectorIsComplete(calcom?.selector);
     const tenant = await updateCompany(company.id, {
-      render_deployment_status: PROVISIONED,
+      agent_status: 'live',
       integration_status: {
         gemini: { configured: true, updatedAt, note: 'Stored encrypted' },
-        calcom: { configured: Boolean(integration.calcomApiKey) && calcomSelectorReady, updatedAt, note: integration.calcomApiKey && calcomSelectorReady ? 'API key stored encrypted; event selector is clinic configuration' : 'Optional; configure an API key and event selector to enable scheduling' },
-        supabase: { configured: true, updatedAt, note: 'Central Supabase configuration present' },
+        calcom: { configured: calcomReady, updatedAt, note: calcomReady ? 'API key stored encrypted; event is clinic configuration' : 'Optional; add an API key and an event to enable scheduling' },
+        supabase: { configured: true, updatedAt, note: 'Stored encrypted; call history is written to the clinic’s own project' },
         twilio: { configured: false, note: 'Not connected' },
       },
     });
     res.status(201).json({ tenant });
   } catch (error) {
-    await updateDeployment(company.id, { render_deployment_status: 'failed' }).catch(() => undefined);
+    await updateCompany(company.id, { agent_status: 'failed' }).catch(() => undefined);
     throw error;
   }
 }));
@@ -200,24 +212,26 @@ apiRouter.get('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   const id = tenantId(req);
   await requireTenantRole(req, id);
   const company = await getCompany(id);
-  const centralSupabase = Boolean(process.env.SUPABASE_URL?.trim() && process.env.SUPABASE_SECRET_KEY?.trim());
   res.json({
     integrations: {
       gemini: configuredStatus(company, 'gemini'),
       calcom: configuredStatus(company, 'calcom'),
+      supabase: configuredStatus(company, 'supabase'),
       twilio: configuredStatus(company, 'twilio'),
-      supabase: { configured: centralSupabase, note: 'Managed centrally by the server' },
     },
   });
 }));
 
 const integrationUpdateSchema = z.object({
-  provider: z.enum(['gemini', 'calcom', 'twilio']),
+  provider: z.enum(['gemini', 'calcom', 'supabase', 'twilio']),
   apiKey: z.string().trim().max(4096).optional(),
   eventTypeId: z.number().int().positive().nullable().optional(),
-  eventTypeSlug: z.string().trim().max(160).optional(),
-  username: z.string().trim().max(160).optional(),
-  teamSlug: z.string().trim().max(160).optional(),
+  eventLink: z.string().trim().max(300).optional(),
+  eventTypeSlug: z.string().trim().max(300).optional(),
+  username: z.string().trim().max(300).optional(),
+  teamSlug: z.string().trim().max(300).optional(),
+  supabaseUrl: z.string().trim().max(300).optional(),
+  supabaseSecretKey: z.string().trim().max(2048).optional(),
   accountSid: z.string().trim().max(128).optional(),
   authToken: z.string().trim().max(512).optional(),
   phoneNumber: z.string().trim().max(32).optional(),
@@ -235,40 +249,52 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   try { assertServerConfig(); } catch (error) {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
-  const existingStatus = configuredStatus(company, input.provider);
   const updatedAt = new Date().toISOString();
   const secretUpdate: ProviderSecretUpdate = {};
-  let nextStatus: { configured: boolean; updatedAt?: string; note?: string } = { ...existingStatus };
+  let nextStatus: IntegrationState = { ...configuredStatus(company, input.provider) };
   const config = { ...company.receptionist_config } as Record<string, unknown>;
+  let message = 'Saved. Secret values are not shown again. Changes apply the next time you start a voice test.';
 
   if (input.provider === 'gemini') {
     if (!input.apiKey) throw new HttpError(400, 'Enter a Gemini API key.');
+    if (await checkGeminiKey(input.apiKey) === 'rejected') throw new HttpError(400, GEMINI_REJECTED);
     secretUpdate.geminiApiKey = input.apiKey;
     nextStatus = { configured: true, updatedAt, note: 'Stored encrypted' };
   } else if (input.provider === 'calcom') {
+    const parsed = parseCalSelector({
+      eventTypeId: input.eventTypeId, eventLink: input.eventLink,
+      eventTypeSlug: input.eventTypeSlug, username: input.username, teamSlug: input.teamSlug,
+    });
+    if (!input.apiKey && !parsed) throw new HttpError(400, 'Enter a Cal.com API key, an event type ID, or an event link.');
     if (input.apiKey) secretUpdate.calcomApiKey = input.apiKey;
-    const calcom = nestedRecord(config.calcom);
-    const hasNewId = typeof input.eventTypeId === 'number' && Number.isInteger(input.eventTypeId) && input.eventTypeId > 0;
-    const hasNewSlug = Boolean(input.eventTypeSlug);
-    if (hasNewId && hasNewSlug) throw new HttpError(400, 'Use either a numeric Cal.com event type ID or a slug, not both.');
-    if (hasNewId) {
-      config.calcom = { ...calcom, event_type_id: input.eventTypeId, event_type_slug: null, username: null, team_slug: null };
-    } else if (hasNewSlug) {
-      const username = input.username || null;
-      const teamSlug = input.teamSlug || null;
-      if (Boolean(username) === Boolean(teamSlug)) throw new HttpError(400, 'A Cal.com event slug needs exactly one username or team slug.');
-      config.calcom = { ...calcom, event_type_id: null, event_type_slug: input.eventTypeSlug, username, team_slug: teamSlug };
-    } else if (input.username || input.teamSlug) {
-      if (Boolean(input.username) === Boolean(input.teamSlug)) throw new HttpError(400, 'Use either a username or team slug.');
-      config.calcom = { ...calcom, username: input.username || null, team_slug: input.teamSlug || null };
+    if (parsed) config.calcom = parsed.selector;
+    const stored = await readTenantProviderSecrets(id);
+    const apiKey = input.apiKey || stored.calcomApiKey || '';
+    const selector = (parsed?.selector ?? nestedRecord(config.calcom)) as unknown as CalSelector;
+    const complete = selectorIsComplete(selector);
+    if (apiKey && complete) {
+      const result = await checkCalCom(selector, apiKey);
+      if (result === 'rejected') throw new HttpError(400, CALCOM_REJECTED);
+      if (result === 'not_found') throw new HttpError(400, CALCOM_NOT_FOUND);
+      if (result === 'unknown') message = 'Saved, but Cal.com could not be reached to confirm it just now. Try a voice test to check.';
     }
-    if (!input.apiKey && !hasNewId && !hasNewSlug && !input.username && !input.teamSlug) throw new HttpError(400, 'Enter a Cal.com API key or event selector.');
-    const resolved = nestedRecord(config.calcom);
+    const missing = !apiKey ? 'Add the API key' : !complete ? 'Add the event type ID or an event link' : '';
+    message = missing ? `Saved. ${missing} to turn scheduling on.` : message;
+    if (parsed?.note) message = `${message} ${parsed.note}`;
     nextStatus = {
-      configured: Boolean(existingStatus.configured || input.apiKey) && Boolean(resolved.event_type_id || (resolved.event_type_slug && (resolved.username || resolved.team_slug))),
+      configured: Boolean(apiKey) && complete,
       updatedAt,
-      note: 'API key stored encrypted; event selector is clinic configuration',
+      note: 'API key stored encrypted; event is clinic configuration',
     };
+  } else if (input.provider === 'supabase') {
+    const stored = await readTenantProviderSecrets(id);
+    const url = normalizeSupabaseUrl(input.supabaseUrl || stored.supabaseUrl || '');
+    const key = cleanSupabaseKey(input.supabaseSecretKey || stored.supabaseSecretKey || '');
+    await checkClinicDatabase(connectClinicDatabase(url, key), id);
+    secretUpdate.supabaseUrl = url;
+    secretUpdate.supabaseSecretKey = key;
+    nextStatus = { configured: true, updatedAt, note: 'Stored encrypted; call history is written to the clinic’s own project' };
+    message = 'Connected. Call history and appointments will now be saved to this Supabase project.';
   } else {
     const accountSid = input.accountSid?.trim() ?? '';
     const authToken = input.authToken?.trim() ?? '';
@@ -280,17 +306,16 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
     secretUpdate.twilioAuthToken = authToken;
     secretUpdate.twilioPhoneNumber = phoneNumber;
     nextStatus = { configured: true, updatedAt, note: 'Credentials stored encrypted only; phone transport remains disabled and no Twilio API calls are made' };
+    message = 'Credentials saved encrypted. Twilio remains disabled; no Twilio API or phone configuration was used.';
   }
 
   const secretChanged = Object.keys(secretUpdate).length > 0;
   if (secretChanged) await mergeAndEncryptTenantProviderSecrets(id, secretUpdate);
   if (input.provider === 'calcom') await updateCompany(id, { receptionist_config: config });
-  if (input.provider === 'gemini' && !isProvisioned(company)) await updateDeployment(id, { render_deployment_status: PROVISIONED });
+  if (input.provider === 'gemini' && !isProvisioned(company)) await updateCompany(id, { agent_status: 'live' });
   await updateIntegrationStatus(id, input.provider, nextStatus);
   if (secretChanged || input.provider === 'calcom') await endClinicCall(id);
-  res.json({ ok: true, provider: input.provider, message: input.provider === 'twilio'
-    ? 'Credentials saved encrypted. Twilio remains disabled; no Twilio API or phone configuration was used.'
-    : 'Configuration saved server-side. Secret values are not returned. Changes apply the next time you start a voice test.' });
+  res.json({ ok: true, provider: input.provider, message });
 }));
 
 apiRouter.get('/tenants/:tenantId/deployment-status', asyncRoute(async (req, res) => {
@@ -333,16 +358,16 @@ apiRouter.delete('/tenants/:tenantId/agent', asyncRoute(async (req, res) => {
   if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent to remove.');
   await endClinicCall(id);
   await clearTenantProviderSecrets(id);
-  await updateDeployment(id, { render_deployment_status: NOT_PROVISIONED });
+  await updateCompany(id, { agent_status: 'not_created' });
   const updatedAt = new Date().toISOString();
-  for (const provider of ['gemini', 'calcom', 'twilio'] as const) {
+  for (const provider of ['gemini', 'calcom', 'supabase', 'twilio'] as const) {
     await updateIntegrationStatus(id, provider, {
       configured: false,
       updatedAt,
       note: 'Agent removed; add a Gemini API key to provision it again',
     });
   }
-  res.json({ ok: true, tenant: await getCompany(id), message: 'Clinic agent removed; stored credentials were deleted and call and appointment history was preserved.' });
+  res.json({ ok: true, tenant: await getCompany(id), message: 'Clinic agent removed; stored credentials were deleted. Call and appointment history stays in the clinic’s own Supabase project.' });
 }));
 
 apiRouter.post('/tenants/:tenantId/voice-token', asyncRoute(async (req, res) => {
@@ -364,11 +389,19 @@ apiRouter.post('/tenants/:tenantId/voice-token', asyncRoute(async (req, res) => 
 apiRouter.get('/tenants/:tenantId/usage', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requireTenantRole(req, id);
-  res.json(await getUsageSummary(id));
+  const db = await clinicDatabase(id);
+  if (!db) return res.json({ calls: 0, appointments: 0, escalationCount: 0, talkSeconds: 0, periodStart: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), connected: false });
+  let summary: Awaited<ReturnType<typeof getUsageSummary>>;
+  try { summary = await getUsageSummary(db, id); } catch { throw new HttpError(502, DATABASE_UNREADABLE); }
+  res.json({ ...summary, connected: true });
 }));
 
 apiRouter.get('/tenants/:tenantId/calls', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requireTenantRole(req, id);
-  res.json({ calls: await listRecentCalls(id) });
+  const db = await clinicDatabase(id);
+  if (!db) return res.json({ calls: [], connected: false });
+  let calls: unknown[];
+  try { calls = await listRecentCalls(db, id); } catch { throw new HttpError(502, DATABASE_UNREADABLE); }
+  res.json({ calls, connected: true });
 }));

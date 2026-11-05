@@ -3,11 +3,13 @@ import { handleAsNodeRequest } from 'cloudflare:node';
 import { app } from '../server/app.js';
 import { configureLoginRateLimiter } from '../server/auth/passcode.js';
 import { configureClinicAgentRuntime } from '../server/agent-runtime.js';
+import { configureRegistry } from '../server/registry/index.js';
 import { ClinicAgent } from './clinic-agent.js';
 import { LoginLimiter } from './login-limiter.js';
+import { Registry } from './registry.js';
 import { UUID_PATTERN } from './voiceAuth.js';
 
-export { ClinicAgent, LoginLimiter };
+export { ClinicAgent, LoginLimiter, Registry };
 
 const EXPRESS_PORT = 3000;
 app.listen(EXPRESS_PORT);
@@ -21,7 +23,21 @@ function limiterStub(key: string) {
   return (env.LOGIN_LIMITER as unknown as DurableObjectNamespace<LoginLimiter>).getByName(key);
 }
 
+function registryStub() {
+  return (env.REGISTRY as unknown as DurableObjectNamespace<Registry>).getByName('registry');
+}
+
 // Bindings are read lazily inside these callbacks, never at module load.
+configureRegistry({
+  listCompanies: () => registryStub().listCompanies() as ReturnType<Registry['listCompanies']>,
+  getCompany: (id) => registryStub().getCompany(id) as ReturnType<Registry['getCompany']>,
+  createCompany: (input) => registryStub().createCompany(input) as ReturnType<Registry['createCompany']>,
+  updateCompany: (id, changes) => registryStub().updateCompany(id, changes) as ReturnType<Registry['updateCompany']>,
+  getSecretRecord: (id) => registryStub().getSecretRecord(id) as ReturnType<Registry['getSecretRecord']>,
+  putSecretRecord: (id, record) => registryStub().putSecretRecord(id, record),
+  deleteSecretRecord: (id) => registryStub().deleteSecretRecord(id),
+});
+
 configureClinicAgentRuntime({
   status: (tenantId) => agentStub(tenantId).status(tenantId),
   endCall: (tenantId) => agentStub(tenantId).endCall(tenantId),

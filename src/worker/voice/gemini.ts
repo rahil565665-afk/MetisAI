@@ -29,6 +29,14 @@ export interface SetupOptions {
   voiceName: string;
   systemInstruction: string;
   tools: FunctionDeclaration[];
+  /** Continue an earlier session instead of starting a fresh one. */
+  resumeHandle?: string | null;
+  /**
+   * Ask for session resumption and sliding-window context compression, which is what lets a call run
+   * past the service's connection and audio-only session limits. Turned off only as a fallback if the
+   * service refuses a setup that includes them.
+   */
+  longSession?: boolean;
 }
 
 export function setupMessage(options: SetupOptions): Record<string, unknown> {
@@ -43,6 +51,10 @@ export function setupMessage(options: SetupOptions): Record<string, unknown> {
       tools: [{ functionDeclarations: options.tools }],
       inputAudioTranscription: {},
       outputAudioTranscription: {},
+      ...(options.longSession === false ? {} : {
+        sessionResumption: options.resumeHandle ? { handle: options.resumeHandle } : {},
+        contextWindowCompression: { slidingWindow: {} },
+      }),
     },
   };
 }
@@ -82,16 +94,30 @@ export type GeminiEvent =
   | { kind: 'toolCall'; calls: ToolCall[] }
   | { kind: 'toolCancel'; ids: string[] }
   | { kind: 'goAway' }
-  | { kind: 'error' };
+  | { kind: 'resumption'; handle: string | null; resumable: boolean }
+  | { kind: 'error'; detail?: string };
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+/** Sample rate of a raw 16-bit PCM audio part, or null if it is some other kind of audio. Extra parameters are tolerated. */
 function audioRate(mimeType: string): number | null {
-  const match = /^audio\/pcm(?:;\s*rate=(\d+))?$/i.exec(mimeType.trim());
+  const match = /^audio\/(?:pcm|l16)\s*(?:;(.*))?$/i.exec(mimeType.trim());
   if (!match) return null;
-  return match[1] ? Number(match[1]) : OUTPUT_AUDIO_RATE;
+  const rate = /(?:^|[;\s])rate\s*=\s*(\d+)/i.exec(match[1] ?? '');
+  return rate ? Number(rate[1]) : OUTPUT_AUDIO_RATE;
+}
+
+/** Text from the service that is safe to show: no control characters, no key-shaped strings, bounded length. */
+export function safeProviderText(value: unknown, max = 160): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[key]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
 }
 
 /**
@@ -107,7 +133,10 @@ export function parseServerMessage(data: FrameData): GeminiEvent[] {
     return [{ kind: 'error' }];
   }
   if (!message) return [{ kind: 'error' }];
-  if (message.error !== undefined) return [{ kind: 'error' }];
+  if (message.error !== undefined) {
+    const detail = safeProviderText(record(message.error)?.message ?? message.error);
+    return [detail ? { kind: 'error', detail } : { kind: 'error' }];
+  }
 
   const events: GeminiEvent[] = [];
   if (message.setupComplete !== undefined) events.push({ kind: 'setupComplete' });
@@ -146,6 +175,11 @@ export function parseServerMessage(data: FrameData): GeminiEvent[] {
   const cancellation = record(message.toolCallCancellation);
   if (cancellation && Array.isArray(cancellation.ids)) {
     events.push({ kind: 'toolCancel', ids: cancellation.ids.filter((id): id is string => typeof id === 'string') });
+  }
+  const resumption = record(message.sessionResumptionUpdate);
+  if (resumption) {
+    const handle = typeof resumption.newHandle === 'string' && resumption.newHandle ? resumption.newHandle : null;
+    events.push({ kind: 'resumption', handle, resumable: resumption.resumable === true && handle !== null });
   }
   if (message.goAway !== undefined) events.push({ kind: 'goAway' });
   return events;

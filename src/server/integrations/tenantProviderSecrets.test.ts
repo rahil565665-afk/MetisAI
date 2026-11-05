@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { before, beforeEach, test } from 'node:test';
+import { RegistryCore, memoryStore } from '../registry/core.js';
+import { configureRegistry, getSecretRecord, putSecretRecord } from '../registry/index.js';
 import {
+  clearTenantProviderSecrets,
   mergeAndEncryptTenantProviderSecrets,
   readTenantProviderSecrets,
 } from './tenantProviderSecrets.js';
@@ -8,85 +11,53 @@ import {
 const tenantId = 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4';
 const otherTenantId = '7c62c466-76b8-42ca-93c2-34433dd87059';
 const dummyGeminiKey = 'dummy-gemini-secret-for-unit-test';
-let encryptedRecord: Record<string, unknown> = {};
-let hasEncryptedRecord = false;
-let originalFetch: typeof globalThis.fetch;
 
 before(() => {
-  process.env.SUPABASE_URL = 'https://dentdesk-secrets-test.invalid';
-  process.env.SUPABASE_SECRET_KEY = 'dummy-supabase-key-for-unit-test';
   process.env.TENANT_CREDENTIALS_ENCRYPTION_KEY = '9f'.repeat(32);
-  originalFetch = globalThis.fetch;
-
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const requestUrl = input instanceof Request ? input.url : input.toString();
-    const url = new URL(requestUrl);
-    assert.equal(url.hostname, 'dentdesk-secrets-test.invalid', 'the test must never contact a real Supabase project');
-    assert.equal(url.pathname, '/rest/v1/tenant_provider_secrets');
-    const method = (init?.method ?? 'GET').toUpperCase();
-
-    if (method === 'GET') {
-      const requestedTenant = (url.searchParams.get('tenant_id') ?? '').replace(/^eq\./, '');
-      if (!hasEncryptedRecord || encryptedRecord.tenant_id !== requestedTenant) {
-        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
-      }
-      return new Response(JSON.stringify(encryptedRecord), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-
-    if (method === 'POST') {
-      const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null;
-      assert.ok(body, 'the fake upsert must receive a JSON row');
-      encryptedRecord = {
-        ...body,
-        created_at: '2026-10-30T00:00:00.000Z',
-        updated_at: '2026-10-30T00:00:00.000Z',
-      };
-      hasEncryptedRecord = true;
-      return new Response(null, { status: 204 });
-    }
-
-    return new Response('Unsupported fake database method.', { status: 405 });
-  }) as typeof globalThis.fetch;
 });
 
-after(() => {
-  globalThis.fetch = originalFetch;
+beforeEach(() => {
+  configureRegistry(new RegistryCore(memoryStore()));
 });
 
 test('provider secrets are encrypted, round-trip correctly, and are bound to one tenant', async () => {
-  encryptedRecord = {};
-  hasEncryptedRecord = false;
   const flags = await mergeAndEncryptTenantProviderSecrets(tenantId, { geminiApiKey: dummyGeminiKey });
-
   assert.equal(flags.geminiApiKey, true);
-  assert.equal(hasEncryptedRecord, true);
-  assert.equal(encryptedRecord.tenant_id, tenantId);
-  assert.equal(typeof encryptedRecord.ciphertext, 'string');
-  assert.equal(typeof encryptedRecord.nonce, 'string');
-  assert.equal(encryptedRecord.key_version, 1);
-  assert.equal(String(encryptedRecord.ciphertext).includes(dummyGeminiKey), false);
+  assert.equal(flags.supabaseSecretKey, false);
 
-  const decrypted = await readTenantProviderSecrets(tenantId);
-  assert.deepEqual(decrypted, { geminiApiKey: dummyGeminiKey });
+  const stored = await getSecretRecord(tenantId);
+  assert.ok(stored);
+  assert.equal(stored.tenant_id, tenantId);
+  assert.equal(stored.key_version, 1);
+  assert.equal(stored.ciphertext.includes(dummyGeminiKey), false);
 
-  const saved = { ...encryptedRecord };
-  encryptedRecord = { ...saved, tenant_id: otherTenantId };
-  await assert.rejects(
-    readTenantProviderSecrets(otherTenantId),
-    /Could not decrypt stored provider secrets/,
-  );
+  assert.deepEqual(await readTenantProviderSecrets(tenantId), { geminiApiKey: dummyGeminiKey });
 
-  const ciphertext = String(saved.ciphertext);
-  const tampered = `${ciphertext[0] === 'A' ? 'B' : 'A'}${ciphertext.slice(1)}`;
-  encryptedRecord = { ...saved, ciphertext: tampered };
-  await assert.rejects(
-    readTenantProviderSecrets(tenantId),
-    /Could not decrypt stored provider secrets/,
-  );
+  // A ciphertext copied onto another clinic's record must not decrypt there.
+  await putSecretRecord(otherTenantId, stored);
+  await assert.rejects(readTenantProviderSecrets(otherTenantId), /Could not decrypt stored provider secrets/);
 
-  encryptedRecord = {};
-  hasEncryptedRecord = false;
+  // A tampered ciphertext must not decrypt either.
+  const tampered = `${stored.ciphertext[0] === 'A' ? 'B' : 'A'}${stored.ciphertext.slice(1)}`;
+  await putSecretRecord(tenantId, { ...stored, ciphertext: tampered });
+  await assert.rejects(readTenantProviderSecrets(tenantId), /Could not decrypt stored provider secrets/);
+});
+
+test('each clinic keeps its own Supabase credentials, merged and cleared independently', async () => {
+  await mergeAndEncryptTenantProviderSecrets(tenantId, { geminiApiKey: dummyGeminiKey, supabaseUrl: 'https://aaaaaaaaaaaaaaaaaaaa.supabase.co', supabaseSecretKey: 'sb_secret_one_value_for_tests' });
+  await mergeAndEncryptTenantProviderSecrets(otherTenantId, { supabaseUrl: 'https://bbbbbbbbbbbbbbbbbbbb.supabase.co', supabaseSecretKey: 'sb_secret_other_value_for_tests' });
+
+  // Adding a Cal.com key keeps what was already stored for the same clinic.
+  await mergeAndEncryptTenantProviderSecrets(tenantId, { calcomApiKey: 'cal_live_test_key' });
+  const first = await readTenantProviderSecrets(tenantId);
+  assert.equal(first.supabaseUrl, 'https://aaaaaaaaaaaaaaaaaaaa.supabase.co');
+  assert.equal(first.calcomApiKey, 'cal_live_test_key');
+  assert.equal((await readTenantProviderSecrets(otherTenantId)).supabaseUrl, 'https://bbbbbbbbbbbbbbbbbbbb.supabase.co');
+
+  await mergeAndEncryptTenantProviderSecrets(tenantId, { calcomApiKey: null });
+  assert.equal((await readTenantProviderSecrets(tenantId)).calcomApiKey, undefined);
+
+  await clearTenantProviderSecrets(tenantId);
+  assert.deepEqual(await readTenantProviderSecrets(tenantId), {});
+  assert.equal((await readTenantProviderSecrets(otherTenantId)).supabaseSecretKey, 'sb_secret_other_value_for_tests');
 });

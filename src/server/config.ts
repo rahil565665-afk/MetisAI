@@ -53,7 +53,7 @@ export function cookieOptions(name = SESSION_COOKIE, secure = requestIsSecure())
 }
 
 export function assertServerConfig(): void {
-  const missing = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL']
+  const missing = ['DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL']
     .filter((name) => !process.env[name]?.trim());
   if (missing.length) throw new Error(`Missing server configuration: ${missing.join(', ')}`);
   const passcode = process.env.DASHBOARD_ADMIN_PASSCODE ?? '';

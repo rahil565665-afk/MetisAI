@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
-import { getCompany } from '../server/integrations/supabase.js';
+import { getCompany } from '../server/registry/index.js';
+import { developmentUrl } from '../server/devOverrides.js';
+import { databaseFromSecrets } from '../server/integrations/clinicDatabase.js';
 import { voiceTokenSigningKeyHex } from '../server/config.js';
 import { readTenantProviderSecrets } from '../server/integrations/tenantProviderSecrets.js';
 import type { ClinicAgentStatus } from '../server/agent-runtime.js';
@@ -22,19 +24,6 @@ export interface ClinicAgentEnv {
 
 function reject(status: number, message: string): Response {
   return new Response(message, { status, headers: { 'Cache-Control': 'no-store' } });
-}
-
-/** Test doubles for Google and Cal.com are honoured only in an explicit local development run. */
-function developmentUrl(name: string): string | undefined {
-  if (process.env.NODE_ENV !== 'development') return undefined;
-  const value = process.env[name]?.trim();
-  if (!value) return undefined;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /** Open the outbound WebSocket to Gemini Live. The API key travels in a header, never in the URL. */
@@ -141,7 +130,7 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       throw new SessionStartError('Clinic agent configuration is unavailable.');
     }
     if (company.id.toLowerCase() !== tenantId || !company.is_active) throw new SessionStartError('This clinic is unavailable.');
-    if (company.render_deployment_status !== 'live') throw new SessionStartError('This clinic has no provisioned voice agent.');
+    if (company.agent_status !== 'live') throw new SessionStartError('This clinic has no provisioned voice agent.');
     const geminiApiKey = secrets.geminiApiKey?.trim();
     if (!geminiApiKey) throw new SessionStartError('The clinic voice service is not configured. Add a Gemini API key.');
 
@@ -153,6 +142,6 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     } catch (error) {
       calError = error instanceof CalComError ? error.message : 'Cal.com scheduling is not configured';
     }
-    return { config, geminiApiKey, cal, calError, store: supabaseCallStore(tenantId) };
+    return { config, geminiApiKey, cal, calError, store: supabaseCallStore(tenantId, databaseFromSecrets(secrets)) };
   }
 }

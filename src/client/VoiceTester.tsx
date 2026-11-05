@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AudioLines, Check, CircleStop, Headphones, Mic, MicOff, Phone, ShieldAlert, X } from 'lucide-react';
 import type { Company, VoiceStatus } from './types.js';
+import type { EndReason } from '../shared/voiceProtocol.js';
 import { VoiceClient, type ApprovalRequest } from './voice/VoiceClient.js';
 
 interface TranscriptRow { role: 'assistant' | 'user' | 'system'; text: string; final: boolean; }
@@ -10,6 +11,14 @@ const OPERATION_TITLE: Record<ApprovalRequest['operation'], string> = {
   create_booking: 'Book appointment',
   reschedule_booking: 'Reschedule appointment',
   cancel_booking: 'Cancel appointment',
+};
+
+/** Why a call ended, for every reason except the person hanging up. Shown in the notice and in the transcript. */
+const ENDED_TEXT: Partial<Record<EndReason, string>> = {
+  time_limit: 'The test call reached its time limit and was ended. Start a new test call to keep going.',
+  idle: 'The test call was ended because nobody spoke for a while. Start a new test call to continue.',
+  admin: 'The call was ended by an administrator, for example because this clinic’s settings changed. Start a new test call to use the new settings.',
+  service: 'The call was ended by the voice service. Start a new test call to try again.',
 };
 
 function fieldLabel(key: string): string {
@@ -85,9 +94,10 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
       error: setError,
       ended: (reason) => {
         setPending(null);
-        if (reason === 'time_limit') setNotice('The test call reached its time limit and was ended.');
-        else if (reason === 'idle') setNotice('The test call was ended after a period of silence.');
-        else if (reason === 'admin') setNotice('The call was ended by an administrator.');
+        const text = ENDED_TEXT[reason];
+        if (!text) { setNotice(''); return; }
+        setNotice(text);
+        appendTranscript({ role: 'system', text, final: true });
       },
     });
     clientRef.current = client;

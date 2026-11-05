@@ -1,13 +1,10 @@
-import {
-  deleteTenantProviderSecretRecord,
-  getTenantProviderSecretRecord,
-  upsertTenantProviderSecretRecord,
-} from './supabase.js';
+import { deleteSecretRecord, getSecretRecord, putSecretRecord } from '../registry/index.js';
 
 export const PROVIDER_SECRET_KEYS = [
   'geminiApiKey',
-  'cartesiaApiKey',
   'calcomApiKey',
+  'supabaseUrl',
+  'supabaseSecretKey',
   'twilioAccountSid',
   'twilioAuthToken',
   'twilioPhoneNumber',
@@ -134,7 +131,7 @@ async function encryptSecrets(tenantId: string, secrets: TenantProviderSecrets):
 /** Read and decrypt a clinic's credentials. Never log or expose the returned values to clients. */
 export async function readTenantProviderSecrets(tenantId: string): Promise<TenantProviderSecrets> {
   tenantContext(tenantId);
-  const record = await getTenantProviderSecretRecord(tenantId);
+  const record = await getSecretRecord(tenantId);
   return record ? await decryptRecord(tenantId, record) : {};
 }
 
@@ -161,7 +158,7 @@ export async function mergeAndEncryptTenantProviderSecrets(
   }
 
   const encrypted = await encryptSecrets(tenantId, merged);
-  await upsertTenantProviderSecretRecord(tenantId, encrypted);
+  await putSecretRecord(tenantId, encrypted);
   return configuredFlags(merged);
 }
 
@@ -175,7 +172,7 @@ export async function getTenantProviderSecretConfiguredFlags(
 /** Delete all encrypted provider credentials for a clinic. */
 export async function clearTenantProviderSecrets(tenantId: string): Promise<void> {
   tenantContext(tenantId);
-  await deleteTenantProviderSecretRecord(tenantId);
+  await deleteSecretRecord(tenantId);
 }
 
 function configuredFlags(secrets: TenantProviderSecrets): ProviderSecretConfiguredFlags {

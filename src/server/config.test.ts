@@ -2,13 +2,11 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { assertServerConfig, cookieOptions, voiceTokenSigningKeyHex } from './config.js';
 
-const NAMES = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL', 'DASHBOARD_SESSION_SECRET', 'TENANT_CREDENTIALS_ENCRYPTION_KEY', 'NODE_ENV'] as const;
+const NAMES = ['DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL', 'DASHBOARD_SESSION_SECRET', 'TENANT_CREDENTIALS_ENCRYPTION_KEY', 'NODE_ENV'] as const;
 const saved: Partial<Record<(typeof NAMES)[number], string | undefined>> = {};
 
 function configure(overrides: Partial<Record<(typeof NAMES)[number], string | undefined>> = {}): void {
   const base: Record<string, string> = {
-    SUPABASE_URL: 'https://example-project.invalid',
-    SUPABASE_SECRET_KEY: 'test-secret-key',
     DASHBOARD_ADMIN_PASSCODE: 'a-long-test-passcode',
     APP_PUBLIC_URL: 'https://dentdesk.example.com',
     DASHBOARD_SESSION_SECRET: 'cd'.repeat(32),
@@ -30,7 +28,7 @@ test('a complete production configuration passes', () => {
 });
 
 test('each required setting is reported when missing', () => {
-  for (const name of ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL'] as const) {
+  for (const name of ['DASHBOARD_ADMIN_PASSCODE', 'APP_PUBLIC_URL'] as const) {
     configure({ [name]: undefined });
     assert.throws(() => assertServerConfig(), new RegExp(name), name);
   }

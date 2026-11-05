@@ -23,12 +23,20 @@ export interface NewTenantInput {
   receptionist_config: { greeting: string; knowledge_base: string };
   integrations: {
     geminiApiKey: string;
+    supabaseUrl: string;
+    supabaseSecretKey: string;
     calcomApiKey: string;
     calcomEventTypeId: number | null;
-    calcomEventTypeSlug: string;
-    calcomUsername: string;
-    calcomTeamSlug: string;
+    calcomEventLink: string;
   };
+}
+
+export interface CallRow {
+  id: string;
+  transport: string;
+  started_at: string;
+  status: string;
+  transfer_requested?: boolean;
 }
 
 export interface UsageSummary {
@@ -37,6 +45,8 @@ export interface UsageSummary {
   escalationCount: number;
   talkSeconds: number;
   periodStart: string;
+  /** False when the clinic has no working Supabase project, so there is nothing to count. */
+  connected: boolean;
 }
 
 export const api = {
@@ -52,5 +62,5 @@ export const api = {
   endCall: async (id: string) => request<{ ok: boolean; ended: boolean; message: string }>(`/api/tenants/${encodeURIComponent(id)}/end-call`, { method: 'POST', body: '{}' }),
   deleteAgent: async (id: string) => request<{ ok: boolean; tenant: Company; message: string }>(`/api/tenants/${encodeURIComponent(id)}/agent`, { method: 'DELETE' }),
   usage: async (id: string) => request<UsageSummary>(`/api/tenants/${encodeURIComponent(id)}/usage`),
-  calls: async (id: string) => (await request<{ calls: any[] }>(`/api/tenants/${encodeURIComponent(id)}/calls`)).calls,
+  calls: async (id: string) => request<{ calls: CallRow[]; connected: boolean }>(`/api/tenants/${encodeURIComponent(id)}/calls`),
 };

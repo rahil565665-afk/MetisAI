@@ -1,0 +1,182 @@
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { HttpError } from '../http.js';
+import { readTenantProviderSecrets, type TenantProviderSecrets } from './tenantProviderSecrets.js';
+
+/**
+ * Every clinic brings its own Supabase project. The console never holds a database of its own for
+ * call history or appointments: it reads and writes the clinic's project with the clinic's secret key,
+ * which is stored encrypted and decrypted only when it is needed.
+ */
+
+const HOSTED_HOST = /^[a-z0-9]{8,40}\.supabase\.co$/;
+const URL_HELP = 'Enter the clinic’s Supabase project URL, like https://abcdefghijklmnop.supabase.co (Supabase → Project Settings → API → Project URL).';
+
+/** Return the origin of a Supabase project URL, or throw a message the administrator can act on. */
+export function normalizeSupabaseUrl(raw: string): string {
+  const text = raw.trim();
+  if (!text) throw new HttpError(400, URL_HELP);
+  let url: URL;
+  try {
+    url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+  } catch {
+    throw new HttpError(400, URL_HELP);
+  }
+  // Local stand-ins are allowed only in an explicit development run, never in production.
+  if (process.env.NODE_ENV === 'development' && ['localhost', '127.0.0.1'].includes(url.hostname)) return url.origin;
+  if (url.protocol !== 'https:' || !HOSTED_HOST.test(url.hostname)) throw new HttpError(400, URL_HELP);
+  return url.origin;
+}
+
+function jwtRole(key: string): string | null {
+  const parts = key.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as { role?: unknown };
+    return typeof payload.role === 'string' ? payload.role : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Trim a pasted secret key and refuse the public keys, which cannot write call history. */
+export function cleanSupabaseKey(raw: string): string {
+  const key = raw.trim();
+  if (key.length < 20 || key.length > 2048 || /\s/.test(key)) {
+    throw new HttpError(400, 'Enter the clinic’s Supabase secret key (Project Settings → API → Secret key). It is one long value with no spaces.');
+  }
+  if (key.startsWith('sb_publishable_') || jwtRole(key) === 'anon') {
+    throw new HttpError(400, 'That is the public Supabase key. Use the secret key instead (it starts with sb_secret_, or is the service_role key).');
+  }
+  return key;
+}
+
+export function connectClinicDatabase(url: string, key: string): SupabaseClient {
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+}
+
+/** A client for a clinic's stored credentials, or null when the clinic has not connected a database. */
+export function databaseFromSecrets(secrets: Pick<TenantProviderSecrets, 'supabaseUrl' | 'supabaseSecretKey'>): SupabaseClient | null {
+  if (!secrets.supabaseUrl || !secrets.supabaseSecretKey) return null;
+  try {
+    return connectClinicDatabase(normalizeSupabaseUrl(secrets.supabaseUrl), secrets.supabaseSecretKey);
+  } catch {
+    return null;
+  }
+}
+
+export async function clinicDatabase(tenantId: string): Promise<SupabaseClient | null> {
+  return databaseFromSecrets(await readTenantProviderSecrets(tenantId));
+}
+
+interface DatabaseErrorLike { message?: string; code?: string }
+
+/** Turn a database failure into advice. Provider error text is never passed on. */
+export function describeDatabaseError(error: DatabaseErrorLike | null | undefined, status?: number): string {
+  const message = error?.message ?? '';
+  const code = error?.code ?? '';
+  if (status === 401 || status === 403 || /invalid api key|jwt|unauthori[sz]ed|permission denied/i.test(message) || code === '42501') {
+    return 'Supabase rejected that secret key. Copy the secret key (not the public one) from Project Settings → API, and check it belongs to this project.';
+  }
+  if (code === '23503') {
+    return 'This project still has an old link that blocks saving call history. Run supabase/clinic-schema.sql in its SQL Editor again, then retry.';
+  }
+  if (code === '42P01' || code === 'PGRST205' || code === 'PGRST204' || /schema cache|does not exist|could not find the table/i.test(message)) {
+    return 'The clinic’s Supabase project is missing its tables. Run supabase/clinic-schema.sql in its SQL Editor, then retry.';
+  }
+  if (/fetch failed|network|enotfound|econn|getaddrinfo|timed? ?out/i.test(message) || status === 0) {
+    return 'Could not reach that Supabase project. Check the project URL and that the project is not paused.';
+  }
+  return `Supabase returned an error${code ? ` (${code.slice(0, 20)})` : ''}. Check the project URL and secret key, and that supabase/clinic-schema.sql has been run.`;
+}
+
+/**
+ * Prove the connection end to end: write a throw-away row, delete it, and read the appointments table.
+ * Throws a 400 whose message says exactly what to fix.
+ */
+export async function checkClinicDatabase(db: SupabaseClient, tenantId: string): Promise<void> {
+  const inserted = await db.from('call_logs')
+    .insert({ tenant_id: tenantId, transport: 'browser', status: 'completed', ended_at: new Date().toISOString(), metadata: { probe: true } })
+    .select('id')
+    .single();
+  if (inserted.error || !inserted.data) throw new HttpError(400, describeDatabaseError(inserted.error, inserted.status));
+  const removed = await db.from('call_logs').delete().eq('id', (inserted.data as { id: string }).id);
+  if (removed.error) console.warn('[clinic-db] could not remove the connection-test row');
+  const appointments = await db.from('receptionist_appointments').select('id').limit(1);
+  if (appointments.error) throw new HttpError(400, describeDatabaseError(appointments.error, appointments.status));
+}
+
+function unwrap<T>(result: { data: T | null; error: { message: string } | null }): T {
+  if (result.error) throw new Error('Database operation failed.');
+  if (result.data === null) throw new Error('Database returned no data.');
+  return result.data;
+}
+
+export async function createCallLog(db: SupabaseClient, tenantId: string, transport: 'browser' | 'twilio'): Promise<string> {
+  const row = unwrap(await db.from('call_logs').insert({ tenant_id: tenantId, transport }).select('id').single()) as { id: string };
+  return row.id;
+}
+
+export async function updateAgentCallLog(db: SupabaseClient, tenantId: string, callId: string, fields: Record<string, unknown>): Promise<void> {
+  const result = await db.from('call_logs').update(fields).eq('tenant_id', tenantId).eq('id', callId).select('id').maybeSingle();
+  if (result.error) throw new Error('Could not update call log.');
+  if (!result.data) throw new Error('Call log was not found for this clinic.');
+}
+
+export async function recordAppointment(db: SupabaseClient, input: { tenantId: string; bookingUid: string; status: string; start: string; end?: string; type: string; name: string; email?: string; phone?: string; callId?: string }): Promise<void> {
+  const result = await db.from('receptionist_appointments').upsert({
+    tenant_id: input.tenantId, cal_booking_uid: input.bookingUid, status: input.status, starts_at: input.start, ends_at: input.end ?? null,
+    appointment_type: input.type, attendee_name: input.name, attendee_email: input.email ?? null, attendee_phone: input.phone ?? null,
+    last_call_id: input.callId ?? null, updated_at: new Date().toISOString(),
+  }, { onConflict: 'tenant_id,cal_booking_uid' });
+  if (result.error) throw new Error('Could not store booking record.');
+}
+
+export async function updateAppointmentStatus(db: SupabaseClient, tenantId: string, bookingUid: string, status: string): Promise<void> {
+  const result = await db.from('receptionist_appointments').update({ status, updated_at: new Date().toISOString() }).eq('tenant_id', tenantId).eq('cal_booking_uid', bookingUid);
+  if (result.error) throw new Error('Could not update booking record.');
+}
+
+export async function recordReschedule(db: SupabaseClient, tenantId: string, oldUid: string, newUid: string | undefined, start: string, callId?: string): Promise<void> {
+  const previous = await db.from('receptionist_appointments').select('*').eq('tenant_id', tenantId).eq('cal_booking_uid', oldUid).maybeSingle();
+  if (previous.error) throw new Error('Could not load prior booking.');
+  const updated = await db.from('receptionist_appointments').update({ status: 'rescheduled', updated_at: new Date().toISOString() }).eq('tenant_id', tenantId).eq('cal_booking_uid', oldUid);
+  if (updated.error) throw new Error('Could not update prior booking.');
+  if (newUid && previous.data) {
+    const result = await db.from('receptionist_appointments').upsert({
+      tenant_id: tenantId, cal_booking_uid: newUid, status: 'accepted', starts_at: start,
+      ends_at: null, appointment_type: previous.data.appointment_type, attendee_name: previous.data.attendee_name,
+      attendee_email: previous.data.attendee_email, attendee_phone: previous.data.attendee_phone, last_call_id: callId ?? null,
+    }, { onConflict: 'tenant_id,cal_booking_uid' });
+    if (result.error) throw new Error('Could not record rescheduled booking.');
+  }
+}
+
+export async function listRecentCalls(db: SupabaseClient, tenantId: string, limit = 20): Promise<unknown[]> {
+  return unwrap(await db.from('call_logs').select('id,status,transport,started_at,ended_at,caller_name,transfer_requested,transfer_reason')
+    .eq('tenant_id', tenantId).order('started_at', { ascending: false }).limit(limit)) as unknown[];
+}
+
+export interface UsageSummary { calls: number; appointments: number; escalationCount: number; talkSeconds: number; periodStart: string }
+
+export async function getUsageSummary(db: SupabaseClient, tenantId: string, since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)): Promise<UsageSummary> {
+  const periodStart = since.toISOString();
+  const [callCount, appointmentCount, rows] = await Promise.all([
+    db.from('call_logs').select('id', { count: 'exact', head: true }).eq('tenant_id', tenantId).gte('started_at', periodStart),
+    db.from('receptionist_appointments').select('id', { count: 'exact', head: true }).eq('tenant_id', tenantId).gte('created_at', periodStart),
+    db.from('call_logs').select('started_at,ended_at,transfer_requested').eq('tenant_id', tenantId).gte('started_at', periodStart).order('started_at', { ascending: false }).limit(2000),
+  ]);
+  if (callCount.error || appointmentCount.error || rows.error) throw new Error('Could not load usage summary.');
+  const records = rows.data ?? [];
+  const talkSeconds = records.reduce((sum, call) => {
+    if (!call.ended_at) return sum;
+    const seconds = (Date.parse(call.ended_at) - Date.parse(call.started_at)) / 1000;
+    return sum + (Number.isFinite(seconds) ? Math.max(0, Math.min(seconds, 4 * 60 * 60)) : 0);
+  }, 0);
+  return {
+    calls: callCount.count ?? 0,
+    appointments: appointmentCount.count ?? 0,
+    escalationCount: records.filter((call) => call.transfer_requested).length,
+    talkSeconds: Math.round(talkSeconds),
+    periodStart,
+  };
+}

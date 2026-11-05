@@ -52,7 +52,7 @@ interface Rig {
   connectedWith: string[];
 }
 
-function rig(options: { cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; approvalTimeoutMs?: number } = {}): Rig {
+function rig(options: { cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; more?: FakeSocket[]; approvalTimeoutMs?: number } = {}): Rig {
   const client = new FakeSocket();
   const gemini = new FakeSocket();
   const { store, calls } = makeStore();
@@ -68,11 +68,11 @@ function rig(options: { cal?: Array<unknown>; limits?: SessionDeps['limits']; pr
   const session = new VoiceSession({
     client,
     prepare: options.prepare ?? (async () => ({ config, geminiApiKey: 'gem-key', cal: CalComClient.create({ event_type_id: 9 }, 'k', { fetcher }), calError: null, store })),
-    connectGemini: options.connect ?? (async (key) => { connectedWith.push(key); return gemini; }),
+    connectGemini: options.connect ?? (async (key) => { connectedWith.push(key); return connectedWith.length === 1 ? gemini : (options.more?.shift() ?? gemini); }),
     model: 'models/test-live',
     voiceName: 'Puck',
     now: () => NOW,
-    limits: { tickMs: 10, logTimeoutMs: 200, ...options.limits },
+    limits: { tickMs: 10, logTimeoutMs: 200, reconnectDelayMs: 1, ...options.limits },
     approvalTimeoutMs: options.approvalTimeoutMs ?? 2000,
     newApprovalId: (() => { let n = 0; return () => `approval-${++n}`; })(),
   });
@@ -310,14 +310,41 @@ test('speech keeps an otherwise quiet call alive', async () => {
   await r.session.end('client');
 });
 
-test('Gemini refusing the connection is reported with an actionable message and logged as an error', async () => {
-  const r = rig();
+test('a refused setup is retried without the long-call settings, then reported with what the service said', async () => {
+  const second = new FakeSocket();
+  const r = rig({ more: [second] });
   await until(() => r.gemini.json.length > 0, 'setup');
-  r.gemini.emit('close', { code: 1007, reason: 'API key not valid' });
+  assert.deepEqual(r.gemini.json[0].setup.sessionResumption, {});
+  assert.deepEqual(r.gemini.json[0].setup.contextWindowCompression, { slidingWindow: {} });
+  r.gemini.emit('close', { code: 1007, reason: 'Unknown name "sessionResumption"' });
+  await until(() => second.json.length > 0, 'retry setup');
+  assert.equal(second.json[0].setup.sessionResumption, undefined);
+  assert.equal(second.json[0].setup.contextWindowCompression, undefined);
+  assert.equal(r.client.json.some((message) => message.type === 'error'), false, 'nothing is reported while the retry is pending');
+
+  second.emit('close', { code: 1008, reason: 'API key not valid. Please pass a valid API key.' });
   await r.done;
-  assert.deepEqual(r.client.json.filter((message) => message.type === 'error'), [{ type: 'error', message: GEMINI_REFUSED }]);
+  const errors = r.client.json.filter((message) => message.type === 'error');
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].message.startsWith(GEMINI_REFUSED));
+  assert.match(errors[0].message, /code 1008: API key not valid/);
   assert.equal(r.client.closed?.code, 1011);
   assert.equal(r.calls.filter(([name]) => name === 'updateCall').at(-1)![1].status, 'error');
+});
+
+test('a setup that works on the retry carries on as a normal call', async () => {
+  const second = new FakeSocket();
+  const r = rig({ more: [second] });
+  await until(() => r.gemini.json.length > 0, 'setup');
+  r.gemini.emit('close', { code: 1007, reason: 'bad field' });
+  await until(() => second.json.length > 0, 'retry setup');
+  second.receive({ setupComplete: {} });
+  await until(() => r.client.json.some((message) => message.type === 'ready'), 'ready');
+  assert.equal(r.client.json.filter((message) => message.type === 'ready').length, 1);
+  assert.match(second.json[1].realtimeInput.text, /Greet them now/);
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  await r.session.end('client');
 });
 
 test('Gemini going quiet during setup times out', async () => {
@@ -326,14 +353,143 @@ test('Gemini going quiet during setup times out', async () => {
   assert.match(r.client.json.find((message) => message.type === 'error').message, /did not respond in time/);
 });
 
-test('Gemini disconnecting mid-call ends it as a service problem', async () => {
+test('Gemini disconnecting mid-call, with nothing to resume from, ends it with the reason', async () => {
   const r = rig();
   await ready(r);
   r.gemini.emit('close', { code: 1011, reason: 'internal' });
   await r.done;
   assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
-  assert.ok(r.client.json.some((message) => message.type === 'error'));
+  assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1011: internal\)/);
 });
+
+const resumable = (r: Rig, handle = 'handle-1') => r.gemini.receive({ sessionResumptionUpdate: { newHandle: handle, resumable: true } });
+
+test('a dropped connection is resumed with the latest handle, without a second greeting or ready', async () => {
+  const second = new FakeSocket();
+  const r = rig({ more: [second] });
+  await ready(r);
+  resumable(r);
+  r.gemini.receive({ sessionResumptionUpdate: { resumable: false } });
+  r.gemini.emit('close', { code: 1011, reason: 'internal' });
+
+  await until(() => second.json.length > 0, 'resume setup');
+  assert.deepEqual(second.json[0].setup.sessionResumption, { handle: 'handle-1' });
+  const notices = () => r.client.json.filter((message) => message.type === 'notice').map((message) => message.message);
+  assert.match(notices().at(-1), /Reconnecting/);
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 0, 'microphone audio is not queued while reconnecting');
+
+  second.receive({ setupComplete: {} });
+  await until(() => notices().at(-1) === '', 'reconnect banner cleared');
+  assert.equal(r.client.json.filter((message) => message.type === 'ready').length, 1);
+  assert.equal(second.json.length, 1, 'no second greeting is requested');
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  second.receive(audioFrom([5, 6]));
+  assert.deepEqual(r.client.binary.map((bytes) => [...bytes]), [[5, 6]]);
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('when the service announces it is going away, the call moves to a fresh connection without a gap', async () => {
+  const second = new FakeSocket();
+  const r = rig({ more: [second] });
+  await ready(r);
+  resumable(r, 'handle-7');
+  r.gemini.receive({ goAway: { timeLeft: '30s' } });
+  await until(() => second.json.length > 0, 'resume setup');
+  assert.deepEqual(second.json[0].setup.sessionResumption, { handle: 'handle-7' });
+
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1, 'the old connection keeps the call going until the new one is ready');
+  const oldClose = () => r.gemini.closed;
+  assert.equal(oldClose(), null);
+
+  second.receive({ setupComplete: {} });
+  await until(() => oldClose() !== null, 'old connection retired');
+  assert.equal(oldClose()?.code, 1000);
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  r.gemini.emit('close', { code: 1000, reason: 'Replaced' });
+  assert.equal(r.session.active, true, 'closing the retired connection does not end the call');
+  await r.session.end('client');
+});
+
+test('a goAway with nothing to resume from only warns the caller', async () => {
+  const r = rig();
+  await ready(r);
+  r.gemini.receive({ goAway: { timeLeft: '30s' } });
+  assert.match(r.client.json.filter((message) => message.type === 'notice').at(-1).message, /will end this session shortly/);
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('when every reconnect attempt fails the call ends with an explanation', async () => {
+  let connects = 0;
+  const gemini = new FakeSocket();
+  const r = rig({ limits: { maxReconnects: 2 }, connect: async () => { connects += 1; if (connects === 1) return gemini; throw new SessionStartError('down'); } });
+  (r as { gemini: FakeSocket }).gemini = gemini;
+  await until(() => gemini.json.length > 0, 'setup');
+  gemini.receive({ setupComplete: {} });
+  await until(() => r.client.json.some((message) => message.type === 'ready'), 'ready');
+  gemini.receive({ sessionResumptionUpdate: { newHandle: 'h', resumable: true } });
+  gemini.emit('close', { code: 1006, reason: '' });
+  await r.done;
+  assert.equal(connects, 3, 'the first connection plus two attempts');
+  assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1006\)/);
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
+});
+
+test('a replacement that never accepts its setup is dropped and the call fails clearly', async () => {
+  const silent = new FakeSocket();
+  const r = rig({ more: [silent], limits: { maxReconnects: 1, setupTimeoutMs: 40 } });
+  await ready(r);
+  resumable(r);
+  r.gemini.emit('close', { code: 1011, reason: '' });
+  await r.done;
+  assert.ok(silent.closed, 'the silent replacement is closed');
+  assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored/);
+});
+
+test('an answer to a tool call from a replaced connection is dropped, and its prompt is closed', async () => {
+  const second = new FakeSocket();
+  const r = rig({ cal: [booking], more: [second] });
+  await ready(r);
+  resumable(r);
+  r.gemini.receive(bookCall());
+  await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'approval prompt');
+  r.gemini.receive({ goAway: { timeLeft: '10s' } });
+  await until(() => second.json.length > 0, 'resume setup');
+  second.receive({ setupComplete: {} });
+  await until(() => r.client.json.some((message) => message.type === 'approval_closed'), 'prompt closed');
+  await wait(40);
+  assert.equal(r.gemini.json.some((message) => message.toolResponse), false);
+  assert.equal(second.json.some((message) => message.toolResponse), false);
+  assert.deepEqual(r.calRequests, [], 'nothing was booked');
+  await r.session.end('client');
+});
+
+test('a quiet call is warned before it ends, and the warning clears when someone speaks', async () => {
+  const r = rig({ limits: { maxDurationMs: 60_000, idleMs: 400, warnMs: 300 } });
+  await ready(r);
+  const notices = () => r.client.json.filter((message) => message.type === 'notice').map((message) => message.message);
+  await until(() => notices().some((message) => /No one has spoken/.test(message)), 'idle warning');
+  assert.equal(r.session.active, true);
+  r.gemini.receive({ serverContent: { inputTranscription: { text: 'hello' } } });
+  await until(() => notices().at(-1) === '', 'warning cleared');
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('the caller is told shortly before the time limit', async () => {
+  const r = rig({ limits: { maxDurationMs: 300, idleMs: 60_000, warnMs: 250 } });
+  await ready(r);
+  await r.done;
+  assert.ok(r.client.json.some((message) => message.type === 'notice' && /time limit/.test(message.message)));
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'time_limit' });
+});
+
+
 
 test('unsupported audio from Gemini ends the call instead of playing noise', async () => {
   const r = rig();

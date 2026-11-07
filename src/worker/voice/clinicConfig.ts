@@ -1,4 +1,5 @@
 import type { CalComSelector } from './calcom.js';
+import { cleanKnowledgeText } from '../../server/integrations/knowledge.js';
 
 /** Non-secret clinic settings the receptionist needs, normalised from the stored `receptionist_config`. */
 export interface ClinicConfig {
@@ -41,7 +42,7 @@ export function normalizeClinicConfig(company: { id: string; name: string; timez
     clinicName: text(company.name, 120),
     timezone: text(company.timezone, 80) || 'UTC',
     greeting: text(raw.greeting, 800),
-    knowledge: text(raw.knowledge_base, 16000),
+    knowledge: cleanKnowledgeText(raw.knowledge_base),
     faqs,
     calcom: {
       event_type_id: calcom.event_type_id,

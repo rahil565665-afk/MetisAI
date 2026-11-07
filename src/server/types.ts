@@ -15,6 +15,8 @@ export interface IntegrationState {
   configured: boolean;
   updatedAt?: string;
   note?: string;
+  /** Set when the credentials were saved but a check showed they do not work yet, with what to fix. */
+  problem?: string;
 }
 
 export interface ReceptionistConfig {

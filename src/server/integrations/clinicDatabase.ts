@@ -68,7 +68,7 @@ export async function clinicDatabase(tenantId: string): Promise<SupabaseClient |
   return databaseFromSecrets(await readTenantProviderSecrets(tenantId));
 }
 
-interface DatabaseErrorLike { message?: string; code?: string }
+interface DatabaseErrorLike { message?: string; code?: string; details?: string }
 
 /** Turn a database failure into advice. Provider error text is never passed on. */
 export function describeDatabaseError(error: DatabaseErrorLike | null | undefined, status?: number): string {
@@ -78,7 +78,7 @@ export function describeDatabaseError(error: DatabaseErrorLike | null | undefine
     return 'Supabase rejected that secret key. Copy the secret key (not the public one) from Project Settings → API, and check it belongs to this project.';
   }
   if (code === '23503') {
-    return 'This project still has an old link that blocks saving call history. Run supabase/clinic-schema.sql in its SQL Editor again, then retry.';
+    return 'This project still has a link from an earlier version that blocks saving call history, and it could not be repaired automatically. Run supabase/clinic-schema.sql in its SQL Editor once, then press Save connection again.';
   }
   if (code === '42P01' || code === 'PGRST205' || code === 'PGRST204' || /schema cache|does not exist|could not find the table/i.test(message)) {
     return 'The clinic’s Supabase project is missing its tables. Run supabase/clinic-schema.sql in its SQL Editor, then retry.';
@@ -90,14 +90,38 @@ export function describeDatabaseError(error: DatabaseErrorLike | null | undefine
 }
 
 /**
+ * A project that was set up with an earlier version of the schema has a foreign key from its tables to a
+ * `companies` table. Rather than make the administrator edit the database, add the one row that link needs
+ * and try again. Only done when the database itself asks for it, and only ever adds a row.
+ */
+function isLegacyLinkError(error: DatabaseErrorLike | null | undefined): boolean {
+  return error?.code === '23503' && /companies/i.test(`${error.details ?? ''} ${error.message ?? ''}`);
+}
+
+async function linkLegacyCompany(db: SupabaseClient, tenantId: string): Promise<boolean> {
+  const result = await db.from('companies').upsert(
+    { id: tenantId, slug: `clinic-${tenantId}`, name: 'Clinic' },
+    { onConflict: 'id', ignoreDuplicates: true },
+  );
+  return !result.error;
+}
+
+async function withLegacyLink<T extends { error: DatabaseErrorLike | null }>(db: SupabaseClient, tenantId: string, run: () => PromiseLike<T>): Promise<T> {
+  const first = await run();
+  if (!isLegacyLinkError(first.error)) return first;
+  if (!(await linkLegacyCompany(db, tenantId))) return first;
+  return run();
+}
+
+/**
  * Prove the connection end to end: write a throw-away row, delete it, and read the appointments table.
  * Throws a 400 whose message says exactly what to fix.
  */
 export async function checkClinicDatabase(db: SupabaseClient, tenantId: string): Promise<void> {
-  const inserted = await db.from('call_logs')
+  const inserted = await withLegacyLink(db, tenantId, () => db.from('call_logs')
     .insert({ tenant_id: tenantId, transport: 'browser', status: 'completed', ended_at: new Date().toISOString(), metadata: { probe: true } })
     .select('id')
-    .single();
+    .single());
   if (inserted.error || !inserted.data) throw new HttpError(400, describeDatabaseError(inserted.error, inserted.status));
   const removed = await db.from('call_logs').delete().eq('id', (inserted.data as { id: string }).id);
   if (removed.error) console.warn('[clinic-db] could not remove the connection-test row');
@@ -112,7 +136,7 @@ function unwrap<T>(result: { data: T | null; error: { message: string } | null }
 }
 
 export async function createCallLog(db: SupabaseClient, tenantId: string, transport: 'browser' | 'twilio'): Promise<string> {
-  const row = unwrap(await db.from('call_logs').insert({ tenant_id: tenantId, transport }).select('id').single()) as { id: string };
+  const row = unwrap(await withLegacyLink(db, tenantId, () => db.from('call_logs').insert({ tenant_id: tenantId, transport }).select('id').single())) as { id: string };
   return row.id;
 }
 
@@ -123,11 +147,11 @@ export async function updateAgentCallLog(db: SupabaseClient, tenantId: string, c
 }
 
 export async function recordAppointment(db: SupabaseClient, input: { tenantId: string; bookingUid: string; status: string; start: string; end?: string; type: string; name: string; email?: string; phone?: string; callId?: string }): Promise<void> {
-  const result = await db.from('receptionist_appointments').upsert({
+  const result = await withLegacyLink(db, input.tenantId, () => db.from('receptionist_appointments').upsert({
     tenant_id: input.tenantId, cal_booking_uid: input.bookingUid, status: input.status, starts_at: input.start, ends_at: input.end ?? null,
     appointment_type: input.type, attendee_name: input.name, attendee_email: input.email ?? null, attendee_phone: input.phone ?? null,
     last_call_id: input.callId ?? null, updated_at: new Date().toISOString(),
-  }, { onConflict: 'tenant_id,cal_booking_uid' });
+  }, { onConflict: 'tenant_id,cal_booking_uid' }));
   if (result.error) throw new Error('Could not store booking record.');
 }
 
@@ -142,11 +166,11 @@ export async function recordReschedule(db: SupabaseClient, tenantId: string, old
   const updated = await db.from('receptionist_appointments').update({ status: 'rescheduled', updated_at: new Date().toISOString() }).eq('tenant_id', tenantId).eq('cal_booking_uid', oldUid);
   if (updated.error) throw new Error('Could not update prior booking.');
   if (newUid && previous.data) {
-    const result = await db.from('receptionist_appointments').upsert({
+    const result = await withLegacyLink(db, tenantId, () => db.from('receptionist_appointments').upsert({
       tenant_id: tenantId, cal_booking_uid: newUid, status: 'accepted', starts_at: start,
       ends_at: null, appointment_type: previous.data.appointment_type, attendee_name: previous.data.attendee_name,
       attendee_email: previous.data.attendee_email, attendee_phone: previous.data.attendee_phone, last_call_id: callId ?? null,
-    }, { onConflict: 'tenant_id,cal_booking_uid' });
+    }, { onConflict: 'tenant_id,cal_booking_uid' }));
     if (result.error) throw new Error('Could not record rescheduled booking.');
   }
 }

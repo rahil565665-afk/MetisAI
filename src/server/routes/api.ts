@@ -17,17 +17,10 @@ import {
   readTenantProviderSecrets,
   type ProviderSecretUpdate,
 } from '../integrations/tenantProviderSecrets.js';
-import {
-  checkClinicDatabase,
-  cleanSupabaseKey,
-  clinicDatabase,
-  connectClinicDatabase,
-  getUsageSummary,
-  listRecentCalls,
-  normalizeSupabaseUrl,
-} from '../integrations/clinicDatabase.js';
-import { parseCalSelector, selectorIsComplete, type CalSelector } from '../integrations/calcomSelector.js';
-import { checkCalCom, checkGeminiKey } from '../integrations/providerChecks.js';
+import { clinicDatabase, getUsageSummary, listRecentCalls } from '../integrations/clinicDatabase.js';
+import type { CalSelector } from '../integrations/calcomSelector.js';
+import { cleanKnowledgeFile, cleanKnowledgeText } from '../integrations/knowledge.js';
+import { parseEventTypeId, setupCalendar, setupDatabase, setupGemini, type ProviderResult } from '../integrations/providerSetup.js';
 import type { Company, IntegrationState } from '../types.js';
 import { getClinicAgentRuntime } from '../agent-runtime.js';
 import { assertServerConfig, voiceTokenSigningKeyHex } from '../config.js';
@@ -37,10 +30,16 @@ export const apiRouter = Router();
 /** A clinic is provisioned ('live') once it has stored credentials and may take voice calls. */
 const isProvisioned = (company: Company): boolean => company.agent_status === 'live';
 
-const GEMINI_REJECTED = 'Google rejected that Gemini API key. Create a key in Google AI Studio and check you copied all of it.';
-const CALCOM_REJECTED = 'Cal.com rejected that API key. Create a new API key in Cal.com (Settings → Developer → API keys) and paste it again.';
-const CALCOM_NOT_FOUND = 'Cal.com could not find that event. Check the event type ID (it is the number in the event’s address in Cal.com) or the link.';
+const DEFAULT_GREETING = 'Thank you for calling. How can I help you today?';
 const DATABASE_UNREADABLE = 'Could not read this clinic’s Supabase database. Check the connection under Integrations.';
+
+/** Why the clinic's database cannot be read: what the last check found, or a general message. */
+async function databaseProblem(id: string): Promise<string> {
+  try {
+    const status = nestedRecord(nestedRecord((await getCompany(id)).integration_status).supabase);
+    return typeof status.problem === 'string' && status.problem ? status.problem : DATABASE_UNREADABLE;
+  } catch { return DATABASE_UNREADABLE; }
+}
 
 function tenantId(req: Request): string {
   const raw = req.params.tenantId;
@@ -93,80 +92,119 @@ apiRouter.get('/tenants', asyncRoute(async (req, res) => {
   res.json({ tenants: await listCompanies() });
 }));
 
+/** A string that is cut to a length instead of being refused for being too long. */
+const clamped = (max: number) => z.string().transform((value) => value.trim().slice(0, max));
+
 const createTenantSchema = z.object({
-  name: z.string().trim().min(1).max(160),
-  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'The service slug may use only lowercase letters, numbers and single dashes.').max(80),
-  timezone: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1, 'Enter the clinic’s name.').max(160),
+  slug: clamped(80).optional(),
+  timezone: clamped(64).optional(),
   receptionist_config: z.object({
-    greeting: z.string().trim().min(1).max(800),
-    knowledge_base: z.string().trim().min(1).max(16000),
-  }).strict(),
+    greeting: clamped(800).optional(),
+    knowledge_base: z.string().optional(),
+    knowledge_base_file: z.unknown().optional(),
+  }).strict().optional(),
   integrations: z.object({
-    geminiApiKey: z.string().trim().min(1, 'Enter the clinic’s Gemini API key.').max(4096),
-    supabaseUrl: z.string().trim().min(1, 'Enter the clinic’s Supabase project URL.').max(300),
-    supabaseSecretKey: z.string().trim().min(1, 'Enter the clinic’s Supabase secret key.').max(2048),
-    calcomApiKey: z.string().trim().max(4096).optional(),
-    calcomEventTypeId: z.number().int().positive().nullable().optional(),
-    calcomEventLink: z.string().trim().max(300).optional(),
-  }).strict(),
+    geminiApiKey: clamped(4096).optional(),
+    supabaseUrl: clamped(300).optional(),
+    supabaseSecretKey: clamped(2048).optional(),
+    calcomApiKey: clamped(4096).optional(),
+    calcomEventTypeId: z.union([z.number(), z.string()]).nullable().optional(),
+    calcomEventLink: clamped(300).optional(),
+  }).strict().optional(),
 }).strict();
+
+function slugify(text: string): string {
+  return text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '') || 'clinic';
+}
+
+const NOT_SET_UP: Record<string, IntegrationState> = {
+  gemini: { configured: false, note: 'Not added yet' },
+  calcom: { configured: false, note: 'Optional; add an API key and an event to enable scheduling' },
+  supabase: { configured: false, note: 'Not connected' },
+  twilio: { configured: false, note: 'Not connected' },
+};
 
 apiRouter.post('/tenants', asyncRoute(async (req, res) => {
   await requirePlatformAdmin(req);
   const input = parseBody(createTenantSchema, req.body);
-  const integration = input.integrations;
   try { assertServerConfig(); } catch (error) {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
+  const given = input.integrations ?? {};
+  const config = input.receptionist_config ?? {};
 
-  // Check everything that can be wrong before anything is stored, so a failed attempt leaves nothing behind.
-  const calcom = parseCalSelector({ eventTypeId: integration.calcomEventTypeId, eventLink: integration.calcomEventLink });
-  const supabaseUrl = normalizeSupabaseUrl(integration.supabaseUrl);
-  const supabaseSecretKey = cleanSupabaseKey(integration.supabaseSecretKey);
-  const id = crypto.randomUUID();
-  await checkClinicDatabase(connectClinicDatabase(supabaseUrl, supabaseSecretKey), id);
-  if (await checkGeminiKey(integration.geminiApiKey) === 'rejected') throw new HttpError(400, GEMINI_REJECTED);
-  const calcomKey = integration.calcomApiKey || '';
-  if (calcomKey && calcom) {
-    const result = await checkCalCom(calcom.selector, calcomKey);
-    if (result === 'rejected') throw new HttpError(400, CALCOM_REJECTED);
-    if (result === 'not_found') throw new HttpError(400, CALCOM_NOT_FOUND);
-  }
-
+  // Nothing about a clinic's providers can stop it being created. The clinic is made first (a name clash
+  // just gets a number added), then each provider is saved and checked, and whatever is wrong is reported.
+  const knowledge = cleanKnowledgeText(config.knowledge_base);
+  const knowledgeFile = knowledge ? cleanKnowledgeFile(config.knowledge_base_file, knowledge.length) : null;
   const receptionistConfig: Record<string, unknown> = {
     clinic_name: input.name,
-    greeting: input.receptionist_config.greeting,
-    knowledge_base: input.receptionist_config.knowledge_base,
+    greeting: config.greeting || DEFAULT_GREETING,
+    knowledge_base: knowledge,
+    ...(knowledgeFile ? { knowledge_base_file: knowledgeFile } : {}),
     faqs: [],
     transfer_enabled: true,
-    calcom: calcom?.selector ?? { event_type_id: null, event_type_slug: null, username: null, team_slug: null },
+    calcom: { event_type_id: null, event_type_slug: null, username: null, team_slug: null },
   };
-  const company = await createCompany({
-    id,
-    slug: input.slug,
-    name: input.name,
-    business_type: 'dental_clinic',
-    timezone: input.timezone,
-    receptionist_config: receptionistConfig,
-  });
-  const updatedAt = new Date().toISOString();
-  const secrets: ProviderSecretUpdate = { geminiApiKey: integration.geminiApiKey, supabaseUrl, supabaseSecretKey };
-  if (calcomKey) secrets.calcomApiKey = calcomKey;
+  const base = slugify(input.slug || input.name);
+  let company: Company | null = null;
+  for (let attempt = 1; attempt <= 50 && !company; attempt += 1) {
+    try {
+      company = await createCompany({ slug: attempt === 1 ? base : `${base}-${attempt}`, name: input.name, business_type: 'dental_clinic', timezone: input.timezone || 'UTC', receptionist_config: receptionistConfig });
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.status !== 409) throw error;
+    }
+  }
+  if (!company) throw new HttpError(409, 'Could not find a free service name for this clinic. Try a different clinic name.');
+  const clinic = company;
+
+  const warnings: string[] = [];
+  const secrets: ProviderSecretUpdate = {};
+  const statuses: Record<string, IntegrationState> = { ...NOT_SET_UP };
+  const attempt = async (provider: string, label: string, run: () => Promise<ProviderResult>): Promise<ProviderResult | null> => {
+    try {
+      const result = await run();
+      Object.assign(secrets, result.secrets);
+      statuses[provider] = result.status;
+      if (result.warning) warnings.push(result.warning);
+      return result;
+    } catch (error) {
+      warnings.push(error instanceof HttpError ? error.message : `${label} could not be set up just now. Add it again under Integrations.`);
+      return null;
+    }
+  };
+
+  if (given.supabaseUrl || given.supabaseSecretKey) {
+    await attempt('supabase', 'The clinic database', () => setupDatabase(clinic.id, given.supabaseUrl ?? '', given.supabaseSecretKey ?? ''));
+  } else {
+    warnings.push('No database is connected, so call history will not be saved. Add the clinic’s Supabase project under Integrations → Clinic Supabase database.');
+  }
+  if (given.geminiApiKey) {
+    await attempt('gemini', 'The Gemini key', () => setupGemini(given.geminiApiKey ?? ''));
+  } else {
+    warnings.push('No Gemini API key yet, so the voice agent is off. Add one under Integrations → Gemini Live to turn it on.');
+  }
+  let calendar: CalSelector | undefined;
+  if (given.calcomApiKey || given.calcomEventLink || (given.calcomEventTypeId !== null && given.calcomEventTypeId !== undefined && String(given.calcomEventTypeId).trim())) {
+    const result = await attempt('calcom', 'Cal.com', () => setupCalendar({
+      apiKey: given.calcomApiKey,
+      eventTypeId: parseEventTypeId(given.calcomEventTypeId),
+      eventLink: given.calcomEventLink,
+    }, {}));
+    calendar = result?.calendar;
+  }
+
   try {
-    await mergeAndEncryptTenantProviderSecrets(company.id, secrets);
-    const calcomReady = Boolean(calcomKey) && selectorIsComplete(calcom?.selector);
-    const tenant = await updateCompany(company.id, {
-      agent_status: 'live',
-      integration_status: {
-        gemini: { configured: true, updatedAt, note: 'Stored encrypted' },
-        calcom: { configured: calcomReady, updatedAt, note: calcomReady ? 'API key stored encrypted; event is clinic configuration' : 'Optional; add an API key and an event to enable scheduling' },
-        supabase: { configured: true, updatedAt, note: 'Stored encrypted; call history is written to the clinic’s own project' },
-        twilio: { configured: false, note: 'Not connected' },
-      },
+    if (Object.keys(secrets).length) await mergeAndEncryptTenantProviderSecrets(clinic.id, secrets);
+    const tenant = await updateCompany(clinic.id, {
+      agent_status: secrets.geminiApiKey ? 'live' : 'not_created',
+      integration_status: statuses,
+      ...(calendar ? { receptionist_config: { ...receptionistConfig, calcom: calendar } } : {}),
     });
-    res.status(201).json({ tenant });
+    res.status(201).json({ tenant, warnings });
   } catch (error) {
-    await updateCompany(company.id, { agent_status: 'failed' }).catch(() => undefined);
+    await updateCompany(clinic.id, { agent_status: 'failed' }).catch(() => undefined);
     throw error;
   }
 }));
@@ -177,17 +215,20 @@ apiRouter.get('/tenants/:tenantId', asyncRoute(async (req, res) => {
   res.json({ tenant: await getCompany(id) });
 }));
 
+// Saving settings never fails because a value is a little too long or a section was left empty:
+// text is cut to its limit, an empty greeting falls back to the standard one, and extra FAQs are dropped.
 const receptionistConfigSchema = z.object({
-  clinic_name: z.string().trim().max(120).optional(),
-  greeting: z.string().trim().min(1).max(800).optional(),
-  knowledge_base: z.string().trim().max(16000).optional(),
-  faqs: z.array(z.object({ question: z.string().trim().min(1).max(300), answer: z.string().trim().min(1).max(2000) })).max(50).optional(),
+  clinic_name: clamped(160).optional(),
+  greeting: clamped(800).optional(),
+  knowledge_base: z.string().optional(),
+  knowledge_base_file: z.unknown().optional(),
+  faqs: z.array(z.object({ question: clamped(300), answer: clamped(2000) })).transform((list) => list.slice(0, 50)).optional(),
   transfer_enabled: z.boolean().optional(),
   calcom: z.object({
     event_type_id: z.number().int().positive().nullable().optional(),
-    event_type_slug: z.string().trim().max(160).nullable().optional(),
-    username: z.string().trim().max(160).nullable().optional(),
-    team_slug: z.string().trim().max(160).nullable().optional(),
+    event_type_slug: clamped(160).nullable().optional(),
+    username: clamped(160).nullable().optional(),
+    team_slug: clamped(160).nullable().optional(),
   }).optional(),
 }).passthrough();
 
@@ -195,13 +236,21 @@ apiRouter.patch('/tenants/:tenantId', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requireTenantRole(req, id, ['owner', 'manager']);
   const schema = z.object({
-    name: z.string().trim().min(1).max(160).optional(),
-    business_type: z.string().trim().min(1).max(80).optional(),
-    timezone: z.string().trim().min(1).max(64).optional(),
+    name: z.string().trim().min(1, 'The clinic name cannot be empty.').max(160).optional(),
+    business_type: clamped(80).optional(),
+    timezone: clamped(64).optional(),
     is_active: z.boolean().optional(),
     receptionist_config: receptionistConfigSchema.optional(),
   }).strict();
   const changes = parseBody(schema, req.body);
+  if (changes.receptionist_config && 'greeting' in changes.receptionist_config && !changes.receptionist_config.greeting) {
+    changes.receptionist_config = { ...changes.receptionist_config, greeting: DEFAULT_GREETING };
+  }
+  if (changes.receptionist_config && typeof changes.receptionist_config.knowledge_base === 'string') {
+    const knowledge = cleanKnowledgeText(changes.receptionist_config.knowledge_base);
+    const file = knowledge ? cleanKnowledgeFile(changes.receptionist_config.knowledge_base_file, knowledge.length) : null;
+    changes.receptionist_config = { ...changes.receptionist_config, knowledge_base: knowledge, knowledge_base_file: file };
+  }
   const tenant = await updateCompany(id, changes);
   // Deactivating a clinic ends any call in progress; other changes apply to the next call.
   if (changes.is_active === false) await endClinicCall(id);
@@ -225,7 +274,7 @@ apiRouter.get('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
 const integrationUpdateSchema = z.object({
   provider: z.enum(['gemini', 'calcom', 'supabase', 'twilio']),
   apiKey: z.string().trim().max(4096).optional(),
-  eventTypeId: z.number().int().positive().nullable().optional(),
+  eventTypeId: z.union([z.number(), z.string()]).nullable().optional(),
   eventLink: z.string().trim().max(300).optional(),
   eventTypeSlug: z.string().trim().max(300).optional(),
   username: z.string().trim().max(300).optional(),
@@ -242,59 +291,22 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   await requireTenantRole(req, id, ['owner', 'manager']);
   const input = parseBody(integrationUpdateSchema, req.body);
   const company = await getCompany(id);
-  // A clinic is provisioned by giving it a Gemini key; every other provider needs that first.
-  if (!isProvisioned(company) && input.provider !== 'gemini') {
-    throw new HttpError(409, 'Add a Gemini API key to provision this clinic agent before configuring other integrations.');
-  }
   try { assertServerConfig(); } catch (error) {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
-  const updatedAt = new Date().toISOString();
-  const secretUpdate: ProviderSecretUpdate = {};
-  let nextStatus: IntegrationState = { ...configuredStatus(company, input.provider) };
-  const config = { ...company.receptionist_config } as Record<string, unknown>;
-  let message = 'Saved. Secret values are not shown again. Changes apply the next time you start a voice test.';
+  const stored = await readTenantProviderSecrets(id);
+  let result: ProviderResult;
 
   if (input.provider === 'gemini') {
-    if (!input.apiKey) throw new HttpError(400, 'Enter a Gemini API key.');
-    if (await checkGeminiKey(input.apiKey) === 'rejected') throw new HttpError(400, GEMINI_REJECTED);
-    secretUpdate.geminiApiKey = input.apiKey;
-    nextStatus = { configured: true, updatedAt, note: 'Stored encrypted' };
+    result = await setupGemini(input.apiKey ?? '');
   } else if (input.provider === 'calcom') {
-    const parsed = parseCalSelector({
-      eventTypeId: input.eventTypeId, eventLink: input.eventLink,
-      eventTypeSlug: input.eventTypeSlug, username: input.username, teamSlug: input.teamSlug,
-    });
-    if (!input.apiKey && !parsed) throw new HttpError(400, 'Enter a Cal.com API key, an event type ID, or an event link.');
-    if (input.apiKey) secretUpdate.calcomApiKey = input.apiKey;
-    if (parsed) config.calcom = parsed.selector;
-    const stored = await readTenantProviderSecrets(id);
-    const apiKey = input.apiKey || stored.calcomApiKey || '';
-    const selector = (parsed?.selector ?? nestedRecord(config.calcom)) as unknown as CalSelector;
-    const complete = selectorIsComplete(selector);
-    if (apiKey && complete) {
-      const result = await checkCalCom(selector, apiKey);
-      if (result === 'rejected') throw new HttpError(400, CALCOM_REJECTED);
-      if (result === 'not_found') throw new HttpError(400, CALCOM_NOT_FOUND);
-      if (result === 'unknown') message = 'Saved, but Cal.com could not be reached to confirm it just now. Try a voice test to check.';
-    }
-    const missing = !apiKey ? 'Add the API key' : !complete ? 'Add the event type ID or an event link' : '';
-    message = missing ? `Saved. ${missing} to turn scheduling on.` : message;
-    if (parsed?.note) message = `${message} ${parsed.note}`;
-    nextStatus = {
-      configured: Boolean(apiKey) && complete,
-      updatedAt,
-      note: 'API key stored encrypted; event is clinic configuration',
-    };
+    result = await setupCalendar({
+      apiKey: input.apiKey,
+      eventTypeId: parseEventTypeId(input.eventTypeId),
+      eventLink: input.eventLink, eventTypeSlug: input.eventTypeSlug, username: input.username, teamSlug: input.teamSlug,
+    }, { apiKey: stored.calcomApiKey, selector: nestedRecord(company.receptionist_config.calcom) });
   } else if (input.provider === 'supabase') {
-    const stored = await readTenantProviderSecrets(id);
-    const url = normalizeSupabaseUrl(input.supabaseUrl || stored.supabaseUrl || '');
-    const key = cleanSupabaseKey(input.supabaseSecretKey || stored.supabaseSecretKey || '');
-    await checkClinicDatabase(connectClinicDatabase(url, key), id);
-    secretUpdate.supabaseUrl = url;
-    secretUpdate.supabaseSecretKey = key;
-    nextStatus = { configured: true, updatedAt, note: 'Stored encrypted; call history is written to the clinic’s own project' };
-    message = 'Connected. Call history and appointments will now be saved to this Supabase project.';
+    result = await setupDatabase(id, input.supabaseUrl || stored.supabaseUrl || '', input.supabaseSecretKey || stored.supabaseSecretKey || '');
   } else {
     const accountSid = input.accountSid?.trim() ?? '';
     const authToken = input.authToken?.trim() ?? '';
@@ -302,20 +314,25 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
     if (!/^AC[a-zA-Z0-9]{20,64}$/.test(accountSid) || authToken.length < 16 || !/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
       throw new HttpError(400, 'Enter a Twilio Account SID, Auth Token and E.164 phone number. Values are stored only; Twilio remains disconnected.');
     }
-    secretUpdate.twilioAccountSid = accountSid;
-    secretUpdate.twilioAuthToken = authToken;
-    secretUpdate.twilioPhoneNumber = phoneNumber;
-    nextStatus = { configured: true, updatedAt, note: 'Credentials stored encrypted only; phone transport remains disabled and no Twilio API calls are made' };
-    message = 'Credentials saved encrypted. Twilio remains disabled; no Twilio API or phone configuration was used.';
+    result = {
+      secrets: { twilioAccountSid: accountSid, twilioAuthToken: authToken, twilioPhoneNumber: phoneNumber },
+      status: { configured: true, updatedAt: new Date().toISOString(), note: 'Credentials stored encrypted only; phone transport remains disabled and no Twilio API calls are made' },
+      message: 'Credentials saved encrypted. Twilio remains disabled; no Twilio API or phone configuration was used.',
+    };
   }
 
-  const secretChanged = Object.keys(secretUpdate).length > 0;
-  if (secretChanged) await mergeAndEncryptTenantProviderSecrets(id, secretUpdate);
-  if (input.provider === 'calcom') await updateCompany(id, { receptionist_config: config });
-  if (input.provider === 'gemini' && !isProvisioned(company)) await updateCompany(id, { agent_status: 'live' });
-  await updateIntegrationStatus(id, input.provider, nextStatus);
+  const secretChanged = Object.keys(result.secrets).length > 0;
+  if (secretChanged) await mergeAndEncryptTenantProviderSecrets(id, result.secrets);
+  const changes: Parameters<typeof updateCompany>[1] = {};
+  if (result.calendar) changes.receptionist_config = { ...company.receptionist_config, calcom: result.calendar };
+  if (input.provider === 'gemini' && result.secrets.geminiApiKey) changes.agent_status = 'live';
+  if (Object.keys(changes).length) await updateCompany(id, changes);
+  await updateIntegrationStatus(id, input.provider, result.status);
   if (secretChanged || input.provider === 'calcom') await endClinicCall(id);
-  res.json({ ok: true, provider: input.provider, message });
+  const message = input.provider !== 'gemini' && !isProvisioned(company) && !stored.geminiApiKey
+    ? `${result.message} The voice agent stays off until a Gemini API key is added.`
+    : result.message;
+  res.json({ ok: true, provider: input.provider, message, ...(result.warning ? { warning: result.warning } : {}) });
 }));
 
 apiRouter.get('/tenants/:tenantId/deployment-status', asyncRoute(async (req, res) => {
@@ -392,7 +409,9 @@ apiRouter.get('/tenants/:tenantId/usage', asyncRoute(async (req, res) => {
   const db = await clinicDatabase(id);
   if (!db) return res.json({ calls: 0, appointments: 0, escalationCount: 0, talkSeconds: 0, periodStart: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), connected: false });
   let summary: Awaited<ReturnType<typeof getUsageSummary>>;
-  try { summary = await getUsageSummary(db, id); } catch { throw new HttpError(502, DATABASE_UNREADABLE); }
+  try { summary = await getUsageSummary(db, id); } catch {
+    return res.json({ calls: 0, appointments: 0, escalationCount: 0, talkSeconds: 0, periodStart: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), connected: false, problem: await databaseProblem(id) });
+  }
   res.json({ ...summary, connected: true });
 }));
 
@@ -402,6 +421,6 @@ apiRouter.get('/tenants/:tenantId/calls', asyncRoute(async (req, res) => {
   const db = await clinicDatabase(id);
   if (!db) return res.json({ calls: [], connected: false });
   let calls: unknown[];
-  try { calls = await listRecentCalls(db, id); } catch { throw new HttpError(502, DATABASE_UNREADABLE); }
+  try { calls = await listRecentCalls(db, id); } catch { return res.json({ calls: [], connected: false, problem: await databaseProblem(id) }); }
   res.json({ calls, connected: true });
 }));

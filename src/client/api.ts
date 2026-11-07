@@ -18,15 +18,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export interface NewTenantInput {
   name: string;
-  slug: string;
   timezone: string;
-  receptionist_config: { greeting: string; knowledge_base: string };
+  receptionist_config: { greeting: string; knowledge_base: string; knowledge_base_file: { name: string; pages: number; characters: number } | null };
+  /** Everything here is optional: a clinic is created whatever is filled in, and problems come back as warnings. */
   integrations: {
     geminiApiKey: string;
     supabaseUrl: string;
     supabaseSecretKey: string;
     calcomApiKey: string;
-    calcomEventTypeId: number | null;
+    calcomEventTypeId: string;
     calcomEventLink: string;
   };
 }
@@ -47,6 +47,7 @@ export interface UsageSummary {
   periodStart: string;
   /** False when the clinic has no working Supabase project, so there is nothing to count. */
   connected: boolean;
+  problem?: string;
 }
 
 export const api = {
@@ -54,13 +55,13 @@ export const api = {
   login: async (passcode: string) => request<{ ok: boolean }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ passcode }) }),
   logout: async () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   tenants: async () => (await request<{ tenants: Company[] }>('/api/tenants')).tenants,
-  createTenant: async (input: NewTenantInput) => (await request<{ tenant: Company }>('/api/tenants', { method: 'POST', body: JSON.stringify(input) })).tenant,
+  createTenant: async (input: NewTenantInput) => request<{ tenant: Company; warnings: string[] }>('/api/tenants', { method: 'POST', body: JSON.stringify(input) }),
   updateTenant: async (id: string, changes: Record<string, unknown>) => (await request<{ tenant: Company }>(`/api/tenants/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(changes) })).tenant,
   integrations: async (id: string) => (await request<{ integrations: Record<string, IntegrationStatus> }>(`/api/tenants/${encodeURIComponent(id)}/integrations`)).integrations,
-  updateIntegration: async (id: string, provider: string, values: Record<string, unknown>) => request<{ ok: boolean; provider: string; message: string }>(`/api/tenants/${encodeURIComponent(id)}/integrations`, { method: 'PUT', body: JSON.stringify({ provider, ...values }) }),
+  updateIntegration: async (id: string, provider: string, values: Record<string, unknown>) => request<{ ok: boolean; provider: string; message: string; warning?: string }>(`/api/tenants/${encodeURIComponent(id)}/integrations`, { method: 'PUT', body: JSON.stringify({ provider, ...values }) }),
   deploymentStatus: async (id: string) => request<Record<string, unknown>>(`/api/tenants/${encodeURIComponent(id)}/deployment-status`),
   endCall: async (id: string) => request<{ ok: boolean; ended: boolean; message: string }>(`/api/tenants/${encodeURIComponent(id)}/end-call`, { method: 'POST', body: '{}' }),
   deleteAgent: async (id: string) => request<{ ok: boolean; tenant: Company; message: string }>(`/api/tenants/${encodeURIComponent(id)}/agent`, { method: 'DELETE' }),
   usage: async (id: string) => request<UsageSummary>(`/api/tenants/${encodeURIComponent(id)}/usage`),
-  calls: async (id: string) => request<{ calls: CallRow[]; connected: boolean }>(`/api/tenants/${encodeURIComponent(id)}/calls`),
+  calls: async (id: string) => request<{ calls: CallRow[]; connected: boolean; problem?: string }>(`/api/tenants/${encodeURIComponent(id)}/calls`),
 };

@@ -9,6 +9,8 @@ export interface IntegrationStatus {
   configured: boolean;
   updatedAt?: string;
   note?: string;
+  /** Saved, but a check showed it does not work yet; says what to fix. */
+  problem?: string;
 }
 
 export interface Company {
@@ -23,6 +25,7 @@ export interface Company {
   receptionist_config: {
     greeting?: string;
     knowledge_base?: string;
+    knowledge_base_file?: { name: string; pages: number; characters: number } | null;
     faqs?: Array<{ question: string; answer: string }>;
     transfer_enabled?: boolean;
     calcom?: CalendarSelector;

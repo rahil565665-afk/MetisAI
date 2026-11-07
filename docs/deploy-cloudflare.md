@@ -46,9 +46,9 @@ Optional plain-text variables (Settings → Variables, type **Text**), only if G
 
 ## 4. Sign in and create a clinic
 
-1. In Supabase, create a project for the clinic. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console refuses it.
+1. In Supabase, create a project for the clinic. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console will not store it. A project that already has tables from an earlier version works as it is: the Worker repairs the old link when it first needs to.
 2. Open the Worker URL and sign in with `DASHBOARD_ADMIN_PASSCODE`.
-3. **Add clinic agent**: name, greeting and knowledge text, the clinic's Supabase URL and secret key, and its Gemini API key. For scheduling, add the Cal.com API key and either the event's link (for example `https://cal.com/your-name/30min`) or its numeric event type ID. The console checks each one before it creates anything, and says which is wrong if one fails.
+3. **Add clinic agent**: only the clinic's name is required. Optionally add the greeting, a PDF as the knowledge base (services, prices, hours, policies; its text is read in your browser and the first 60,000 characters are used), the clinic's Supabase URL and secret key, and its Gemini API key. For scheduling, add the Cal.com API key and either the event's link (for example `https://cal.com/your-name/30min`) or its numeric event type ID. Nothing here can stop the clinic being created: each value is saved and checked, and anything that is wrong is listed after the clinic appears, marked **Needs attention** under Integrations, so you can correct it there.
 4. Open the clinic and press **Start browser test**, allow the microphone, and talk. The receptionist greets you first. Use headphones — with speakers, the microphone can pick up the assistant and make it interrupt itself.
 
 ## What the free plan covers
@@ -88,8 +88,10 @@ Roughly 3,000 call-minutes a day by request count — shared with dashboard use.
 | Some pages return Cloudflare error 1102 ("exceeded resource limits") | The Free plan's 10 ms CPU limit per request was hit. Retry once; if it persists, upgrade to Workers Paid. |
 | Everything returns an error late in the day | The daily Free-plan request allowance is used up; it resets at 00:00 UTC. |
 | A clinic's keys can no longer be read after a deploy | `TENANT_CREDENTIALS_ENCRYPTION_KEY` was changed or lost. |
-| Adding a clinic says the database is missing its tables | `supabase/clinic-schema.sql` has not been run in that clinic's Supabase project. |
-| Adding a clinic says Supabase rejected the secret key | The wrong key was pasted (publishable / anon, or from another project). Use the **secret** key shown under *Project Settings → API Keys*. |
+| The clinic was created but Supabase shows *Needs attention*: missing its tables | `supabase/clinic-schema.sql` has not been run in that clinic's Supabase project. Run it, then press **Save connection** again. |
+| The clinic was created but Supabase shows *Needs attention*: link from an earlier version | The project's old foreign key could not be repaired automatically (usually a restricted key). Run `supabase/clinic-schema.sql` in that project's SQL Editor, then press **Save connection** again. |
+| Supabase shows *Needs attention*: rejected the secret key | The wrong key was pasted (publishable / anon, or from another project). Use the **secret** key shown under *Project Settings → API Keys*. |
+| A PDF upload says no text could be read | The PDF is a scan or a set of pictures. Export a PDF with selectable text (for example from Word or Google Docs), or run OCR on it first. Password-protected PDFs must be unlocked first. |
 | Cal.com says the event was not found | The link or event type ID does not belong to the account that owns the API key. |
 | Call activity says the database is not connected | The clinic's Supabase URL or key stopped working. Re-enter it under **Integrations → Clinic Supabase database**. |
 

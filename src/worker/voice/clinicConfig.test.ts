@@ -46,3 +46,10 @@ test('text containing control characters is dropped rather than passed to the mo
   assert.equal(config.greeting, '');
   assert.equal(config.knowledge, 'line one\nline two\ttabbed');
 });
+
+test('knowledge from an uploaded PDF is kept, tidied and cut to the limit', () => {
+  const kept = normalizeClinicConfig({ ...base, receptionist_config: { knowledge_base: 'Hours\u0000 8-5\r\n\r\n\r\n\r\nClosed Sundays' } });
+  assert.equal(kept.knowledge, 'Hours  8-5\n\nClosed Sundays');
+  const long = normalizeClinicConfig({ ...base, receptionist_config: { knowledge_base: 'x'.repeat(100_000) } });
+  assert.equal(long.knowledge.length, 60_000);
+});

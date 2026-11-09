@@ -155,6 +155,69 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('opening it shows what the receptionist did', /WHAT THE RECEPTIONIST DID/.test(detail) && /Booked Ada Lovelace/.test(detail), detail.replace(/\s+/g, ' ').slice(0, 200));
   check('and the conversation, including the confirmation', /CONVERSATION/.test(detail) && /Yes, that is all correct/.test(detail) && /Is all of that correct/.test(detail), detail.replace(/\s+/g, ' ').slice(0, 400));
   await page.screenshot({ path: `${OUT}/call-detail.png` });
+
+  console.log('--- responsive Overview screenshots: data, empty database, and database not connected');
+  await page.locator('.nav-item', { hasText: 'Overview' }).click();
+  await page.locator('.usage-summary').waitFor();
+  await page.waitForFunction(() => document.querySelector('.usage-stats')?.children.length === 4, null, { timeout: 10000 });
+  const states = [{ name: 'with-data', id: await page.getByLabel('Choose active clinic').inputValue() }];
+  const additional = await page.evaluate(async () => {
+    const create = async (name, integrations) => {
+      const response = await fetch('/api/tenants', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, timezone: 'UTC', integrations }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `Could not create screenshot fixture (${response.status})`);
+      return body.tenant.id;
+    };
+    return {
+      empty: await create('Overview Empty Fixture', { supabaseUrl: 'http://127.0.0.1:9922', supabaseSecretKey: 'sb_secret_e2e_clinic_two_key_000000002' }),
+      disconnected: await create('Overview Disconnected Fixture', {}),
+    };
+  });
+  states.push({ name: 'empty', id: additional.empty }, { name: 'disconnected', id: additional.disconnected });
+  await page.reload();
+  await page.locator('.nav-item', { hasText: 'Overview' }).waitFor();
+  const widths = [1440, 1280, 1024, 768, 390];
+  for (const state of states) {
+    await page.getByLabel('Choose active clinic').selectOption(state.id);
+    await page.locator('.usage-summary').waitFor();
+    if (state.name === 'with-data') {
+      await page.waitForFunction(() => document.querySelector('.usage-stats')?.children.length === 4, null, { timeout: 10000 });
+      check('the four usage stats are rendered as readable tiles', await page.locator('.usage-stat').count() === 4);
+      check('stat values use large readable text', await page.locator('.usage-stat-value').evaluateAll((nodes) => nodes.every((node) => Number.parseFloat(getComputedStyle(node).fontSize) >= 20)));
+    } else if (state.name === 'empty') {
+      await page.getByText('No usage recorded for this period.').waitFor();
+    } else {
+      await page.getByText(/database is not connected, so there is no usage to show/).waitFor();
+    }
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForTimeout(150);
+      const layout = await page.evaluate(() => {
+        const bar = document.querySelector('.tenant-context');
+        const pill = bar?.querySelector('.pill');
+        const summary = document.querySelector('.usage-summary');
+        const bounds = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
+        return { bar: bar && bounds(bar), pill: pill && bounds(pill), summary: summary && bounds(summary), width: innerWidth, pageWidth: document.body.scrollWidth, rootOverflow: getComputedStyle(document.documentElement).overflowX };
+      });
+      check(`${state.name} ${width}px has no horizontal page overflow`, layout.pageWidth <= width && layout.rootOverflow === 'hidden', `${layout.pageWidth}/${width}, root overflow ${layout.rootOverflow}`);
+      check(`${state.name} ${width}px keeps the active status pill inside its bar`, Boolean(layout.bar && layout.pill && layout.pill.right <= layout.bar.right + 1 && layout.pill.left >= layout.bar.left - 1), JSON.stringify({ bar: layout.bar, pill: layout.pill }));
+      if (state.name === 'with-data') {
+        const tiles = await page.locator('.usage-stat').evaluateAll((nodes) => nodes.map((node) => {
+          const card = node.getBoundingClientRect();
+          const value = node.querySelector('.usage-stat-value').getBoundingClientRect();
+          const label = node.querySelector('.usage-stat-label').getBoundingClientRect();
+          return value.left >= card.left && value.right <= card.right && label.left >= card.left && label.right <= card.right && value.bottom <= card.bottom && label.bottom <= card.bottom;
+        }));
+        check(`${width}px keeps every stat value and label within its tile`, tiles.length === 4 && tiles.every(Boolean));
+      }
+      await page.locator('.app-shell').screenshot({ path: `${OUT}/overview-${state.name}-${width}x900.png` });
+    }
+    if (state.name === 'with-data') {
+      await page.setViewportSize({ width: 1280, height: 560 });
+      await page.screenshot({ path: `${OUT}/overview-${state.name}-1280x560-viewport.png` });
+      await page.locator('.app-shell').screenshot({ path: `${OUT}/overview-${state.name}-1280x560-full.png` });
+    }
+  }
   const setups = (await (await fetch('http://127.0.0.1:9912/__state')).json()).setups;
   console.log('gemini setups:', JSON.stringify(setups));
   check('the first connection asked for resumption + compression, later ones resumed with a handle', setups.length >= 3 && setups[0].resumeHandle === null && setups[0].resumption && setups[0].compression && setups.slice(1).every((s) => /^handle-/.test(s.resumeHandle)), '');

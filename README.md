@@ -48,13 +48,13 @@ That is plenty for testing and a handful of clinics. Calls are capped at 30 minu
 
 ## Configuration
 
-All values are Cloudflare **Secrets** in production (`.dev.vars` for `pnpm dev:worker`, `.env` for `pnpm dev`).
+All values are Cloudflare **Secrets** in production (type *Secret*, not *Text*; `wrangler.jsonc` sets `keep_vars` so deploys never delete dashboard variables) (`.dev.vars` for `pnpm dev:worker`, `.env` for `pnpm dev`).
 
 | Name | Purpose |
 | --- | --- |
 | `DASHBOARD_ADMIN_PASSCODE` | Sign-in passcode, 8–128 characters. |
 | `DASHBOARD_SESSION_SECRET` | 32 random bytes (64 hex). Signs sessions and derives each clinic's voice-token key. |
-| `TENANT_CREDENTIALS_ENCRYPTION_KEY` | 32 random bytes (64 hex). Encrypts saved provider keys (AES-256-GCM). **Back it up** — losing it means re-entering every clinic's keys. |
+| `TENANT_CREDENTIALS_ENCRYPTION_KEY` | 32 random bytes (64 hex). Encrypts saved provider keys (AES-256-GCM). **Back it up and never regenerate it** — if it changes, saved keys can no longer be read and have to be entered again (the clinics themselves are kept). |
 | `APP_PUBLIC_URL` | Exact public origin, e.g. `https://metisai.<you>.workers.dev`. HTTPS, no path. |
 
 Generate the two random keys with `openssl rand -hex 32`. The server refuses to run with a missing or malformed value rather than falling back to a default.
@@ -111,8 +111,10 @@ pnpm dev                    # API on :3001, web on :3000
 - Voices are Gemini's built-in voices only (Cartesia support from the earlier container version was removed).
 - The knowledge base is the text of one uploaded PDF (plus FAQs). The text is read in your browser and only the text is saved; the PDF itself is not stored. The first 60,000 characters are used, scanned or image-only PDFs have no text to read and are rejected with a message, and embeddings and vector search are not implemented.
 - Human hand-off in the browser raises a logged escalation event; it does not dial a phone.
-- The list of clinics and their encrypted keys live in a Durable Object (free SQLite-backed storage), not in Supabase. It is small and strongly consistent, but it is one place: if you delete the Worker, the clinic list goes with it, so keep a note of each clinic's settings.
+- The list of clinics and their encrypted keys live in a Durable Object (free SQLite-backed storage), not in Supabase. It survives deploys and restarts, but it is one place: if you delete the Worker, the clinic list goes with it. **Download backup** (Overview page) saves every clinic and its encrypted keys to a file; **Restore from backup** adds them back to a Worker that has lost them. Keep the file together with your `TENANT_CREDENTIALS_ENCRYPTION_KEY`.
 - Adding a clinic is never blocked by a provider check. Only the clinic name is required; a wrong key, a missing table or an unknown Cal.com event is saved, shown as *Needs attention* with the reason, and listed in a banner after the clinic is created, so you can fix it later under Integrations. The one exception is a value that cannot be stored safely at all (a URL that is not a Supabase project, a public Supabase key, an unreadable Cal.com link), which is reported and left out.
 - A Supabase project that was set up with an earlier version of this project has a foreign key to a `companies` table. When the database reports that link, the Worker adds the one `companies` row it asks for and retries, so call history saves without any SQL. Running `supabase/clinic-schema.sql` removes the link for good.
-- A clinic whose Supabase project is unreachable still takes calls; its call history is just not saved until the connection works again (the console says so on the Overview and Call activity pages).
+- A clinic whose Supabase project is unreachable still takes calls; its call history is just not saved until the connection works again (the console says so on the Overview and Call activity pages, and the voice test page says so as soon as a call starts).
+- Call history includes the conversation text, stored only in the clinic's own Supabase project (`call_logs.metadata`). It can contain personal information: decide on retention and consent before using real patient data. Raw audio is never recorded.
+- Booking needs a caller's confirmation of their spoken name, phone number and email, then your click on **Approve action** in the browser. The receptionist cannot book without both. It has still never booked on a real Cal.com account in this project's tests; do one real test booking after you deploy.
 - Earlier versions kept every clinic in one central Supabase database. That data is not migrated: recreate the clinic, and the old central tables can be deleted from that project.

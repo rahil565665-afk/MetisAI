@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ToolError, awareIso, bookingStatus, cleanBookingUid, cleanEmail, cleanText, cleanTimeZone, utcIso } from './validation.js';
+import { ToolError, awareIso, bookingStatus, callerConfirmed, cleanBookingUid, cleanEmail, cleanPersonName, cleanPhone, cleanText, cleanTimeZone, spellEmail, utcIso } from './validation.js';
 
 test('cleanText trims and rejects empty, long, non-string and control characters', () => {
   assert.equal(cleanText('  Ada  ', 'name', 10), 'Ada');
@@ -11,7 +11,51 @@ test('cleanText trims and rejects empty, long, non-string and control characters
 
 test('cleanEmail lowercases and requires a plausible address', () => {
   assert.equal(cleanEmail(' Ada@Example.COM '), 'ada@example.com');
-  for (const bad of ['ada', 'ada@', '@example.com', 'a b@example.com', 'ada@example']) assert.throws(() => cleanEmail(bad), ToolError);
+  for (const bad of ['ada', 'ada@', '@example.com', 'ada@example', 'Ahorita.gmail.com', 'ada..lovelace@example.com', '.ada@example.com', 'ada@@example.com', 'ada@exam_ple.com']) {
+    assert.throws(() => cleanEmail(bad), ToolError, bad);
+  }
+});
+
+test('cleanEmail understands an address as it is spoken or spelled out', () => {
+  assert.equal(cleanEmail('jacob at gmail dot com'), 'jacob@gmail.com');
+  assert.equal(cleanEmail('Jacob Kennedy at Gmail dot com'), 'jacobkennedy@gmail.com');
+  assert.equal(cleanEmail('j a c o b at g mail dot com'), 'jacob@gmail.com');
+  assert.equal(cleanEmail('jacob dot kennedy underscore 20 at example dot co dot uk'), 'jacob.kennedy_20@example.co.uk');
+  assert.equal(cleanEmail('ada dash lovelace@example.com'), 'ada-lovelace@example.com');
+});
+
+test('an address with no @ is refused with advice to have it spelled, not guessed', () => {
+  assert.throws(() => cleanEmail('Ahorita.gmail.com'), (error: unknown) => error instanceof ToolError && /no single "@"/.test(error.message) && /spell/.test(error.message));
+});
+
+test('a domain that is almost certainly a slip for a common provider is questioned', () => {
+  for (const slip of ['jacob@gmial.com', 'jacob@gmail.con', 'jacob@yahooo.com']) {
+    assert.throws(() => cleanEmail(slip), (error: unknown) => error instanceof ToolError && /looks like a mistake/.test(error.message), slip);
+  }
+});
+
+test('spellEmail reads an address back letter by letter, with common providers as words', () => {
+  assert.equal(spellEmail('jacob.k_2@gmail.com'), 'j, a, c, o, b, dot, k, underscore, 2, at, gmail dot com');
+  assert.equal(spellEmail('ada@clinic.example'), 'a, d, a, at, c, l, i, n, i, c, dot, e, x, a, m, p, l, e');
+});
+
+test('cleanPhone needs 7 to 15 digits and only completes a bare US number for US time zones', () => {
+  assert.deepEqual(cleanPhone('(555) 123-4567', 'America/Chicago'), { display: '5551234567', e164: '+15551234567', spoken: '5 5 5, 1 2 3, 4 5 6 7' });
+  assert.equal(cleanPhone('1 555 123 4567', 'America/New_York').e164, '+15551234567');
+  assert.equal(cleanPhone('+44 20 7946 0958', 'Europe/London').e164, '+442079460958');
+  assert.equal(cleanPhone('5551234567', 'Europe/London').e164, null);
+  for (const bad of ['12345', 'call me', '1'.repeat(16)]) assert.throws(() => cleanPhone(bad, 'UTC'), ToolError, bad);
+});
+
+test('cleanPersonName wants a real name', () => {
+  assert.equal(cleanPersonName('  Jacob   Kennedy '), 'Jacob Kennedy');
+  assert.equal(cleanPersonName("Siobhán O'Neil-Smith Jr."), "Siobhán O'Neil-Smith Jr.");
+  for (const bad of ['J', '12345', 'a@b.com', '   ', 'DROP TABLE;']) assert.throws(() => cleanPersonName(bad), ToolError, bad);
+});
+
+test('callerConfirmed needs a clear yes and no hint of a correction', () => {
+  for (const yes of ['Yes', 'yeah that is correct', 'Yes, go ahead', 'right', 'Sounds good', 'ok']) assert.equal(callerConfirmed(yes), true, yes);
+  for (const no of ['', 'No', 'no that is wrong', 'yes but actually the email is different', 'hmm', 'wait', 'the name is spelled differently']) assert.equal(callerConfirmed(no), false, no);
 });
 
 test('cleanBookingUid accepts Cal.com style ids only', () => {

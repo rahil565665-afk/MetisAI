@@ -61,7 +61,14 @@ test('creating a booking posts the attendee and returns only a safe summary', as
   const booking = await client.createBooking({ name: 'Ada', email: 'ada@example.com', start: new Date('2026-11-05T09:00:00Z'), timeZone: 'UTC' });
   assert.deepEqual(booking, { uid: 'uid123', status: 'accepted', start: '2026-11-05T09:00:00.000Z', end: '2026-11-05T09:30:00.000Z', eventType: { title: 'Checkup' } });
   assert.equal(calls[0]!.headers['cal-api-version'], '2026-02-25');
-  assert.deepEqual(calls[0]!.body, { eventTypeId: 77, start: '2026-11-05T09:00:00Z', attendee: { name: 'Ada', email: 'ada@example.com', timeZone: 'UTC', language: 'en' } });
+  assert.deepEqual(calls[0]!.body, { eventTypeId: 77, start: '2026-11-05T09:00:00Z', attendee: { name: 'Ada', email: 'ada@example.com', timeZone: 'UTC', language: 'en' }, metadata: { source: 'metisai-receptionist' } });
+});
+
+test('a booking carries the phone number and the reason for the visit', async () => {
+  const { fetcher, calls } = fakeFetcher([ok({ uid: 'uid123', status: 'accepted', start: '2026-11-05T09:00:00.000Z' })]);
+  const client = CalComClient.create({ event_type_id: 77 }, 'k', { fetcher });
+  await client.createBooking({ name: 'Ada', email: 'ada@example.com', start: new Date('2026-11-05T09:00:00Z'), timeZone: 'UTC', phone: '+14155550123', reason: 'Cleaning' });
+  assert.deepEqual(calls[0]!.body, { eventTypeId: 77, start: '2026-11-05T09:00:00Z', attendee: { name: 'Ada', email: 'ada@example.com', timeZone: 'UTC', language: 'en', phoneNumber: '+14155550123' }, metadata: { reason: 'Cleaning', source: 'metisai-receptionist' } });
 });
 
 test('attendee identity must match and the booking must still be open', async () => {
@@ -86,8 +93,8 @@ test('reschedule and cancel use the booking endpoints with the booking API versi
   assert.ok(calls.every((call) => call.headers['cal-api-version'] === '2026-02-25'));
 });
 
-test('HTTP failures become friendly errors that never contain credentials or provider text', async () => {
-  const cases: Array<[number, RegExp]> = [[401, /credentials/], [403, /credentials/], [404, /not found/], [409, /no longer available/], [429, /rate limit/], [500, /could not complete/]];
+test('HTTP failures become friendly errors that never contain credentials; a refused request says why, with the key hidden', async () => {
+  const cases: Array<[number, RegExp]> = [[401, /credentials/], [403, /credentials/], [404, /not found/], [409, /no longer available/], [429, /rate limit/], [500, /could not complete/], [400, /refused the request: leaks \[hidden\]/], [422, /refused the request/]];
   for (const [status, pattern] of cases) {
     const client = CalComClient.create({ event_type_id: 1 }, 'super-secret', { fetcher: fakeFetcher([{ status, body: { message: 'leaks super-secret' } }]).fetcher });
     await assert.rejects(client.availableSlots(new Date(), new Date(), 'UTC'), (error: unknown) => {
@@ -99,6 +106,15 @@ test('HTTP failures become friendly errors that never contain credentials or pro
   }
   const unreachable = CalComClient.create({ event_type_id: 1 }, 'super-secret', { fetcher: fakeFetcher([new Error('connect ECONNREFUSED super-secret')]).fetcher });
   await assert.rejects(unreachable.availableSlots(new Date(), new Date(), 'UTC'), (error: unknown) => error instanceof CalComError && error.message === 'Cal.com could not be reached');
+});
+
+test('a refused request carries only a short, cleaned reason from Cal.com', async () => {
+  const run = (body: unknown) => CalComClient.create({ event_type_id: 1 }, 'cal_live_abc123', { fetcher: fakeFetcher([{ status: 400, body }]).fetcher }).createBooking({ name: 'A', email: 'a@b.co', start: new Date(), timeZone: 'UTC' });
+  await assert.rejects(run({ status: 'error', error: { message: 'Attendee phone number is invalid' } }), { message: 'Cal.com refused the request: Attendee phone number is invalid' });
+  await assert.rejects(run({ message: ['start must be a future date', 'email is invalid'] }), { message: 'Cal.com refused the request: start must be a future date; email is invalid' });
+  await assert.rejects(run({ error: { message: 'bad Bearer cal_live_zzz and cal_live_abc123' } }), (error: unknown) => error instanceof CalComError && !/cal_live_/.test(error.message));
+  await assert.rejects(run('not json'), { message: 'Cal.com refused the request' });
+  await assert.rejects(run({ message: 'x'.repeat(2000) }), (error: unknown) => error instanceof CalComError && error.message.length < 260);
 });
 
 test('unsuccessful or empty payloads are rejected', async () => {

@@ -1,8 +1,8 @@
 import { HttpError } from '../http.js';
 import type { Company, IntegrationState } from '../types.js';
-import { RegistryCore, memoryStore, type CompanyChanges, type NewCompany, type RegistryApi, type SecretRecord } from './core.js';
+import { RegistryCore, memoryStore, type BackupData, type CompanyChanges, type NewCompany, type RegistryApi, type RestoreResult, type SecretRecord } from './core.js';
 
-export type { CompanyChanges, NewCompany, RegistryApi, SecretRecord } from './core.js';
+export type { BackupData, CompanyChanges, NewCompany, RegistryApi, RestoreResult, SecretRecord } from './core.js';
 
 let configured: RegistryApi | undefined;
 let developmentFallback: RegistryApi | undefined;
@@ -57,4 +57,12 @@ export async function putSecretRecord(id: string, record: Pick<SecretRecord, 'ci
 
 export async function deleteSecretRecord(id: string): Promise<void> {
   await registry().deleteSecretRecord(id);
+}
+
+export async function exportBackup(): Promise<BackupData> {
+  return registry().exportAll();
+}
+
+export async function restoreBackup(data: BackupData): Promise<RestoreResult> {
+  return registry().importAll(data);
 }

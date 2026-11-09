@@ -3,7 +3,7 @@ import { getCompany } from '../server/registry/index.js';
 import { developmentUrl } from '../server/devOverrides.js';
 import { databaseFromSecrets } from '../server/integrations/clinicDatabase.js';
 import { voiceTokenSigningKeyHex } from '../server/config.js';
-import { readTenantProviderSecrets } from '../server/integrations/tenantProviderSecrets.js';
+import { readTenantProviderSecrets, SecretsUnreadableError, SECRETS_UNREADABLE_PROBLEM } from '../server/integrations/tenantProviderSecrets.js';
 import type { ClinicAgentStatus } from '../server/agent-runtime.js';
 import { CalComClient, CalComError } from './voice/calcom.js';
 import { normalizeClinicConfig } from './voice/clinicConfig.js';
@@ -15,6 +15,7 @@ import {
   type PreparedSession,
   type VoiceSocket,
 } from './voice/session.js';
+import type { SchedulingStatus } from './voice/receptionist.js';
 import { supabaseCallStore } from './voice/store.js';
 import { UUID_PATTERN, VOICE_SUBPROTOCOL, bearerToken, subprotocolToken, validOrigin, verifyVoiceToken } from './voiceAuth.js';
 
@@ -47,6 +48,22 @@ async function openGeminiSocket(apiKey: string): Promise<VoiceSocket> {
   socket.binaryType = 'arraybuffer';
   socket.accept();
   return socket as unknown as VoiceSocket;
+}
+
+/**
+ * Whether booking will really work on this call: Cal.com is configured, accepts the key, and finds the event.
+ * Checked before the call starts so the receptionist is told the truth and can say so, instead of improvising.
+ * The reason is advice for the administrator, never provider text.
+ */
+async function checkScheduling(cal: CalComClient | null, calError: string | null, timeZone: string): Promise<SchedulingStatus> {
+  if (!cal) return { available: false, reason: calError ?? 'Cal.com scheduling is not configured' };
+  try {
+    const now = new Date();
+    await cal.availableSlots(now, new Date(now.getTime() + 24 * 60 * 60 * 1000), timeZone);
+    return { available: true };
+  } catch (error) {
+    return { available: false, reason: error instanceof CalComError ? error.message : 'Cal.com could not be checked' };
+  }
 }
 
 /**
@@ -112,9 +129,11 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       voiceName: settings.voiceName,
     });
     this.session = session;
-    void session.run().finally(() => {
+    // The call is written to the clinic's history after the browser disconnects, so keep this object alive for it.
+    const running = session.run().finally(() => {
       if (this.session === session) this.session = null;
     });
+    this.ctx.waitUntil(running);
 
     // Operational problems from here on are reported over the open socket, because a browser cannot
     // read the body of a failed WebSocket handshake.
@@ -126,7 +145,8 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     let secrets: Awaited<ReturnType<typeof readTenantProviderSecrets>>;
     try {
       [company, secrets] = await Promise.all([getCompany(tenantId), readTenantProviderSecrets(tenantId)]);
-    } catch {
+    } catch (error) {
+      if (error instanceof SecretsUnreadableError) throw new SessionStartError(SECRETS_UNREADABLE_PROBLEM);
       throw new SessionStartError('Clinic agent configuration is unavailable.');
     }
     if (company.id.toLowerCase() !== tenantId || !company.is_active) throw new SessionStartError('This clinic is unavailable.');
@@ -142,6 +162,7 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     } catch (error) {
       calError = error instanceof CalComError ? error.message : 'Cal.com scheduling is not configured';
     }
-    return { config, geminiApiKey, cal, calError, store: supabaseCallStore(tenantId, databaseFromSecrets(secrets)) };
+    const scheduling = await checkScheduling(cal, calError, config.timezone);
+    return { config, geminiApiKey, cal, calError, scheduling, store: supabaseCallStore(tenantId, databaseFromSecrets(secrets)) };
   }
 }

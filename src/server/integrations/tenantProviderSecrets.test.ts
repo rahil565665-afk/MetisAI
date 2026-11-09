@@ -6,6 +6,8 @@ import {
   clearTenantProviderSecrets,
   mergeAndEncryptTenantProviderSecrets,
   readTenantProviderSecrets,
+  readTenantProviderSecretsSafe,
+  SecretsUnreadableError,
 } from './tenantProviderSecrets.js';
 
 const tenantId = 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4';
@@ -60,4 +62,26 @@ test('each clinic keeps its own Supabase credentials, merged and cleared indepen
   await clearTenantProviderSecrets(tenantId);
   assert.deepEqual(await readTenantProviderSecrets(tenantId), {});
   assert.equal((await readTenantProviderSecrets(otherTenantId)).supabaseSecretKey, 'sb_secret_other_value_for_tests');
+});
+
+test('keys saved under a different encryption key are reported as unreadable, and a clinic can still be repaired', async () => {
+  const original = process.env.TENANT_CREDENTIALS_ENCRYPTION_KEY;
+  await mergeAndEncryptTenantProviderSecrets(tenantId, { geminiApiKey: dummyGeminiKey, calcomApiKey: 'cal-old-key' });
+  try {
+    process.env.TENANT_CREDENTIALS_ENCRYPTION_KEY = '3a'.repeat(32);
+    await assert.rejects(readTenantProviderSecrets(tenantId), (error: unknown) => error instanceof SecretsUnreadableError);
+    assert.deepEqual(await readTenantProviderSecretsSafe(tenantId), { secrets: {}, unreadable: true });
+
+    // Entering one key again works instead of failing, and only that key is stored afterwards.
+    const flags = await mergeAndEncryptTenantProviderSecrets(tenantId, { geminiApiKey: 'brand-new-gemini-key' });
+    assert.equal(flags.geminiApiKey, true);
+    assert.equal(flags.calcomApiKey, false);
+    assert.deepEqual(await readTenantProviderSecretsSafe(tenantId), { secrets: { geminiApiKey: 'brand-new-gemini-key' }, unreadable: false });
+  } finally {
+    process.env.TENANT_CREDENTIALS_ENCRYPTION_KEY = original;
+  }
+});
+
+test('a clinic with no saved keys is readable and empty', async () => {
+  assert.deepEqual(await readTenantProviderSecretsSafe(otherTenantId), { secrets: {}, unreadable: false });
 });

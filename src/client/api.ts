@@ -35,8 +35,34 @@ export interface CallRow {
   id: string;
   transport: string;
   started_at: string;
+  ended_at?: string | null;
   status: string;
+  caller_name?: string | null;
   transfer_requested?: boolean;
+  /** One line on how the call ended, for example "Booked Jacob for Friday at 9:00 AM." */
+  outcome?: string | null;
+  note_count?: number;
+}
+
+export interface CallDetail {
+  id: string;
+  transport: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  caller_name: string | null;
+  caller_phone: string | null;
+  transfer_requested: boolean;
+  transfer_reason: string | null;
+  metadata: {
+    outcome?: string;
+    end_reason?: string;
+    failure?: string;
+    scheduling?: { available: boolean; reason?: string };
+    transcript?: Array<{ role: 'user' | 'assistant'; text: string; at?: string }>;
+    events?: Array<{ text: string; at?: string }>;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface UsageSummary {
@@ -63,5 +89,13 @@ export const api = {
   endCall: async (id: string) => request<{ ok: boolean; ended: boolean; message: string }>(`/api/tenants/${encodeURIComponent(id)}/end-call`, { method: 'POST', body: '{}' }),
   deleteAgent: async (id: string) => request<{ ok: boolean; tenant: Company; message: string }>(`/api/tenants/${encodeURIComponent(id)}/agent`, { method: 'DELETE' }),
   usage: async (id: string) => request<UsageSummary>(`/api/tenants/${encodeURIComponent(id)}/usage`),
+  downloadBackup: async () => {
+    const response = await fetch('/api/backup', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error(`Could not create the backup (${response.status}).`);
+    const name = /filename="([^"]+)"/.exec(response.headers.get('content-disposition') ?? '')?.[1] ?? 'metisai-clinics.json';
+    return { blob: await response.blob(), filename: name };
+  },
+  restoreBackup: async (payload: unknown) => request<{ restored: number; skipped: number; renamed: number; tenants: Company[] }>('/api/backup/restore', { method: 'POST', body: JSON.stringify(payload) }),
   calls: async (id: string) => request<{ calls: CallRow[]; connected: boolean; problem?: string }>(`/api/tenants/${encodeURIComponent(id)}/calls`),
+  call: async (id: string, callId: string) => (await request<{ call: CallDetail }>(`/api/tenants/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}`)).call,
 };

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Headphones, LayoutDashboard, LogOut, Mic2, Plus, Settings2, ShieldCheck, SlidersHorizontal, Stethoscope, X } from 'lucide-react';
-import { api, type CallRow, type NewTenantInput, type UsageSummary } from './api.js';
+import { api, type CallDetail, type CallRow, type NewTenantInput, type UsageSummary } from './api.js';
 import * as React from 'react';
 import type { Company, IntegrationStatus, SessionUser } from './types.js';
 import { KnowledgeUpload, type KnowledgeValue } from './KnowledgeUpload.js';
+import { BackupPanel } from './BackupPanel.js';
 
 const VoiceTester = React.lazy(() => import('./VoiceTester.js').then((module) => ({ default: module.VoiceTester })));
 
@@ -80,6 +81,11 @@ export function App() {
     setActiveId('');
   }
 
+  function restored(list: Company[]) {
+    setTenants(list);
+    setActiveId((current) => list.some((tenant) => tenant.id === current) ? current : list[0]?.id ?? '');
+  }
+
   async function createTenant(input: NewTenantInput) {
     const { tenant, warnings } = await api.createTenant(input);
     setTenants((current) => [tenant, ...current]);
@@ -120,8 +126,9 @@ export function App() {
         {error && <div className="alert error inline-alert">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
         {created && <div className={`alert inline-alert created-banner ${created.warnings.length ? 'warn' : ''}`}><div><strong>{created.name} was created.</strong>{created.warnings.length > 0 && <> These still need attention (you can fix each one under Integrations):<ul>{created.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></>}</div><button aria-label="Dismiss" onClick={() => setCreated(null)}><X size={14} /></button></div>}
         {active && <div className="tenant-context"><div className="tenant-monogram">{shortName(active.name)}</div><div className="tenant-context-name"><span>ACTIVE CLINIC</span><strong>{active.name}</strong></div><div className="tenant-switcher"><select aria-label="Choose active clinic" value={active.id} onChange={(event) => setActiveId(event.target.value)}>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select><ChevronDown size={14} /></div><span className={`pill ${active.is_active ? 'active-pill' : 'paused-pill'}`}><i />{active.is_active ? 'ACTIVE' : 'PAUSED'}</span></div>}
-        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Stethoscope size={22} /></div><h2>Create your first clinic agent</h2><p>Each clinic gets its own voice agent, running on Cloudflare and answering through Gemini Live, and keeps its call history in its own Supabase project.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button></div>}
+        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Stethoscope size={22} /></div><h2>Create your first clinic agent</h2><p>Each clinic gets its own voice agent, running on Cloudflare and answering through Gemini Live, and keeps its call history in its own Supabase project.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button><div className="empty-restore"><span>Had clinics before? Bring them back from a backup file.</span><BackupPanel download={false} onRestored={restored} /></div></div>}
         {active && page === 'overview' && <Overview tenant={active as ExtendedCompany} go={setPage} canManage={user.isPlatformAdmin} onUpdate={(next) => setTenants((items) => items.map((item) => item.id === next.id ? next : item))} />}
+        {active && page === 'overview' && user.isPlatformAdmin && <section className="panel backup-section"><div className="eyebrow">SAFEKEEPING</div><BackupPanel onRestored={restored} /></section>}
         {active && page === 'voice' && voiceTenant && <React.Suspense fallback={<div className="loading-screen"><div className="spinner" /><span>Loading voice test tools</span></div>}><VoiceTester tenant={voiceTenant} /></React.Suspense>}
         {active && page === 'clinic' && <ClinicSetup tenant={active} onUpdate={(next) => setTenants((items) => items.map((item) => item.id === next.id ? next : item))} />}
         {active && page === 'integrations' && <Integrations tenant={active} />}
@@ -223,7 +230,7 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
   return <><div className="overview-grid"><section className="panel readiness-panel"><div className="panel-head"><div><div className="eyebrow">SERVICE CONFIGURATION</div><h2>Reception stack</h2></div><div className="readiness-score"><strong>{ready}<small>/{checks.length}</small></strong><span>CONFIGURED</span></div></div><div className="readiness-list">{checks.map((item) => <div className="readiness-row" key={item.id}><span className={`provider-icon ${item.id}`}><i /></span><span className="provider-name">{item.label}</span><span className={`readiness-state ${item.state}`}><i />{connectionLabel(item.state)}</span></div>)}</div>{checks.filter((item) => item.problem).map((item) => <div className="alert warn" key={item.id}><strong>{item.label}:</strong> {item.problem}</div>)}<button className="text-link" onClick={() => go('integrations')}>Manage provider settings <ChevronRight size={15} /></button></section><section className="panel test-panel"><div className="eyebrow">BROWSER TEST</div><div className="test-visual"><div className="test-orbit"><Mic2 size={24} /></div><div className="test-wave"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div></div><h2>Try a conversation</h2><p>Check the greeting, audio quality, and escalation flow before phone integration.</p><button className="button secondary" onClick={() => go('voice')}>Open voice test <ChevronRight size={15} /></button></section></div>
     <section className="panel deployment-panel"><div className="panel-head"><div><div className="eyebrow">USAGE SUMMARY</div><h2>Last 30 days</h2></div><span className="mini-badge">{usage ? periodLabel : '30-day period'}</span></div>{usageLoading ? <div className="readiness-list"><div className="readiness-row"><span className="provider-name">Loading clinic usage…</span></div></div> : usage && !usage.connected ? <div className="alert">This clinic’s Supabase database is not connected, so there is no usage to show. <button className="text-link inline-link" onClick={() => go('integrations')}>Connect it</button></div> : usageError ? <div className="alert error">{usageError}</div> : usage && usage.calls === 0 && usage.appointments === 0 && usage.escalationCount === 0 && usage.talkSeconds === 0 ? <div className="panel empty-activity"><CalendarDays size={20} /><span>No usage recorded for this period.</span></div> : usage ? <div className="readiness-list"><div className="readiness-row"><span className="provider-name">Calls</span><span className="readiness-state">{usage.calls.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Appointments</span><span className="readiness-state">{usage.appointments.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Handoffs</span><span className="readiness-state">{usage.escalationCount.toLocaleString()}</span></div><div className="readiness-row"><span className="provider-name">Talk time</span><span className="readiness-state">{talkTime(usage.talkSeconds)}</span></div></div> : null}</section>
     <section className="panel deployment-panel"><div className="panel-head"><div><div className="eyebrow">CLOUDFLARE VOICE AGENT</div><h2>Agent status</h2></div><button className="button secondary" onClick={() => void refreshDeployment()} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh status'}</button></div><div className="readiness-list"><div className="readiness-row"><span className="provider-name">Agent provisioned</span><span className={`readiness-state ${deployment.provisioned ? 'ok' : ''}`}><i />{yesNo(deployment.provisioned)}</span></div><div className="readiness-row"><span className="provider-name">Call in progress</span><span className={`readiness-state ${deployment.inCall ? 'ok' : ''}`}><i />{yesNo(deployment.inCall)}</span></div><div className="readiness-row"><span className="provider-name">Agent state</span><span className="readiness-state">{agentStateLabel(deployment.status)}</span></div></div><div className="privacy-note"><ShieldCheck size={16} /><span>The agent only runs while a voice test is open and uses nothing between calls. Starting a test opens one WebSocket; there is no background pinger.</span></div>{lifecycleNotice && <div className="alert">{lifecycleNotice}</div>}{canManage && <div className="modal-actions"><button className="button secondary" onClick={() => void endCall()} disabled={lifecycleBusy}>{lifecycleBusy ? 'Working…' : 'End call in progress'}</button><button className="button secondary" onClick={() => void removeAgent()} disabled={lifecycleBusy}>Remove clinic agent</button></div>}{deployment.provisioned === false && <div className="alert">No voice agent is provisioned for this clinic. Add a Gemini API key to provision it.</div>}{deployment.error && <div className="alert error">Voice agent status: {deployment.error}</div>}</section>
-    <div className="section-title-row"><div><div className="eyebrow">LATEST ACTIVITY</div><h2>Recent calls</h2></div><button className="text-link" onClick={() => go('calls')}>View call history <ChevronRight size={15} /></button></div><CallTable rows={calls.slice(0, 5)} />{!calls.length && <div className="panel empty-activity"><CalendarDays size={20} /><span>{databaseConnected === false ? (databaseProblem || 'This clinic’s Supabase database is not connected, so calls are not being saved.') : 'No calls recorded yet. Start a browser voice test to see activity here.'}</span></div>}</>;
+    <div className="section-title-row"><div><div className="eyebrow">LATEST ACTIVITY</div><h2>Recent calls</h2></div><button className="text-link" onClick={() => go('calls')}>View call history <ChevronRight size={15} /></button></div><CallTable rows={calls.slice(0, 5)} tenantId={tenant.id} />{!calls.length && <div className="panel empty-activity"><CalendarDays size={20} /><span>{databaseConnected === false ? (databaseProblem || 'This clinic’s Supabase database is not connected, so calls are not being saved.') : 'No calls recorded yet. Start a browser voice test to see activity here.'}</span></div>}</>;
 }
 
 function ClinicSetup({ tenant, onUpdate }: { tenant: Company; onUpdate: (next: Company) => void }) {
@@ -329,12 +336,39 @@ function CallActivity({ tenant }: { tenant: Company }) {
   const [problem, setProblem] = useState('');
   const [error, setError] = useState('');
   useEffect(() => { setError(''); void api.calls(tenant.id).then((result) => { setRows(result.calls); setConnected(result.connected); setProblem(result.problem ?? ''); }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Could not load call activity.')); }, [tenant.id]);
-  return <><div className="panel call-list-panel"><div className="panel-head"><div><div className="eyebrow">CALL HISTORY</div><h2>Recent sessions</h2></div><span className="mini-badge">{rows.length} RECORDS</span></div>{error && <div className="alert error">{error}</div>}{!connected && <div className="alert warn">{problem || 'This clinic’s Supabase database is not connected, so calls are not being saved.'} Check it under Integrations → Clinic Supabase database.</div>}<CallTable rows={rows} /></div><div className="privacy-note full-note"><ShieldCheck size={16} /><span>Conversation text can contain personal information. Raw browser audio is not recorded. Define retention and consent before using real patient data.</span></div></>;
+  return <><div className="panel call-list-panel"><div className="panel-head"><div><div className="eyebrow">CALL HISTORY</div><h2>Recent sessions</h2></div><span className="mini-badge">{rows.length} RECORDS</span></div>{error && <div className="alert error">{error}</div>}{!connected && <div className="alert warn">{problem || 'This clinic’s Supabase database is not connected, so calls are not being saved.'} Check it under Integrations → Clinic Supabase database.</div>}<CallTable rows={rows} tenantId={tenant.id} /></div><div className="privacy-note full-note"><ShieldCheck size={16} /><span>Conversation text can contain personal information. Raw browser audio is not recorded. Define retention and consent before using real patient data.</span></div></>;
 }
 
-function CallTable({ rows }: { rows: CallRow[] }) {
+function CallTable({ rows, tenantId }: { rows: CallRow[]; tenantId: string }) {
+  const [open, setOpen] = useState<string | null>(null);
   if (!rows.length) return <div className="table-empty"><Activity size={18} /><span>No call activity yet.</span></div>;
-  return <div className="table-wrap"><table><thead><tr><th>SESSION</th><th>TRANSPORT</th><th>STARTED</th><th>STATUS</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><span className="call-id">{row.id.slice(0, 8).toUpperCase()}</span>{row.transfer_requested && <span className="transfer-tag">HANDOFF</span>}</td><td>{row.transport === 'browser' ? 'Browser test' : 'Twilio'}</td><td>{new Date(row.started_at).toLocaleString()}</td><td><span className={`call-state ${row.status === 'completed' ? 'done' : row.status === 'transfer_requested' ? 'attention' : 'live'}`}><i />{row.status.replaceAll('_', ' ')}</span></td></tr>)}</tbody></table></div>;
+  return <div className="table-wrap"><table><thead><tr><th>SESSION</th><th>STARTED</th><th>CALLER</th><th>STATUS</th><th>WHAT HAPPENED</th><th><span className="sr-only">Details</span></th></tr></thead><tbody>{rows.map((row) => <React.Fragment key={row.id}><tr><td><span className="call-id">{row.id.slice(0, 8).toUpperCase()}</span>{row.transfer_requested && <span className="transfer-tag">HANDOFF</span>}<div className="call-transport">{row.transport === 'browser' ? 'Browser test' : 'Twilio'}</div></td><td>{new Date(row.started_at).toLocaleString()}</td><td>{row.caller_name || '—'}</td><td><span className={`call-state ${row.status === 'completed' ? 'done' : row.status === 'transfer_requested' ? 'attention' : row.status === 'error' ? 'failed' : 'live'}`}><i />{row.status.replaceAll('_', ' ')}</span></td><td className="call-outcome">{row.outcome || '—'}</td><td><button type="button" className="text-link" aria-expanded={open === row.id} onClick={() => setOpen(open === row.id ? null : row.id)}>{open === row.id ? 'Hide' : 'Details'}</button></td></tr>{open === row.id && <tr className="call-detail-row"><td colSpan={6}><CallDetailView tenantId={tenantId} callId={row.id} /></td></tr>}</React.Fragment>)}</tbody></table></div>;
+}
+
+function CallDetailView({ tenantId, callId }: { tenantId: string; callId: string }) {
+  const [call, setCall] = useState<CallDetail | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let current = true;
+    setCall(null); setError('');
+    void api.call(tenantId, callId).then((value) => { if (current) setCall(value); }).catch((cause: unknown) => { if (current) setError(cause instanceof Error ? cause.message : 'Could not load this call.'); });
+    return () => { current = false; };
+  }, [tenantId, callId]);
+  if (error) return <div className="alert error" role="alert">{error}</div>;
+  if (!call) return <div className="call-detail-loading">Loading…</div>;
+  const meta = call.metadata ?? {};
+  const events = Array.isArray(meta.events) ? meta.events : [];
+  const transcript = Array.isArray(meta.transcript) ? meta.transcript : [];
+  return <div className="call-detail" aria-label="Call details">
+    {call.caller_name && <p className="call-detail-line"><strong>Caller</strong> {call.caller_name}{call.caller_phone ? ` · ${call.caller_phone}` : ''}</p>}
+    {call.ended_at && <p className="call-detail-line"><strong>Length</strong> {Math.max(0, Math.round((Date.parse(call.ended_at) - Date.parse(call.started_at)) / 1000))} seconds</p>}
+    {meta.failure && <div className="alert error">{meta.failure}</div>}
+    {meta.scheduling && meta.scheduling.available === false && <div className="alert warn">Booking was not available on this call{meta.scheduling.reason ? `: ${meta.scheduling.reason}` : '.'}</div>}
+    {call.transfer_reason && <p className="call-detail-line"><strong>Handoff</strong> {call.transfer_reason}</p>}
+    {events.length > 0 && <><div className="eyebrow">WHAT THE RECEPTIONIST DID</div><ul className="call-events">{events.map((item, index) => <li key={index}>{item.text}</li>)}</ul></>}
+    <div className="eyebrow">CONVERSATION</div>
+    {transcript.length === 0 ? <p className="call-detail-line">No conversation text was saved for this call.</p> : <div className="call-transcript">{transcript.map((line, index) => <div key={index} className={`transcript-line ${line.role}`}><span>{line.role === 'user' ? 'CALLER' : 'RECEPTIONIST'}</span><p>{line.text}</p></div>)}</div>}
+  </div>;
 }
 
 function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: NewTenantInput) => Promise<void> }) {

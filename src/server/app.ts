@@ -16,6 +16,8 @@ app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// A clinic backup can hold many clinics, each with up to 60,000 characters of knowledge text.
+app.use('/api/backup/restore', express.json({ limit: '5mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use((req: Request, _res: Response, next: NextFunction) => {
   const cookies: Record<string, string> = {};

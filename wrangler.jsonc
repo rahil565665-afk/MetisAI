@@ -5,6 +5,10 @@
   "compatibility_date": "2026-10-29",
   // Smaller bundle, faster cold start (the free plan allows 1 second of startup time).
   "minify": true,
+  // A deploy must never wipe settings added in the Cloudflare dashboard. Without this, every deploy deletes
+  // dashboard variables of type "Text" (secrets are always kept), which would knock out the passcode or the
+  // encryption key and leave saved clinics unreadable until they are re-entered.
+  "keep_vars": true,
   "compatibility_flags": [
     "nodejs_compat",
     "nodejs_compat_populate_process_env"

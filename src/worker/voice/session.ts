@@ -2,6 +2,7 @@ import {
   MAX_CLIENT_AUDIO_FRAME_BYTES,
   parseClientMessage,
   type AgentMessage,
+  type CallHistory,
   type EndReason,
 } from '../../shared/voiceProtocol.js';
 import { ApprovalGate, type ApprovalNotifier } from './approval.js';
@@ -20,11 +21,14 @@ import {
   type ToolResult,
 } from './gemini.js';
 import {
+  BookingMemory,
   GREETING_TRIGGER,
   TOOL_DECLARATIONS,
   buildSystemInstruction,
   runTool,
+  type CallFields,
   type CallStore,
+  type SchedulingStatus,
   type ToolDeps,
 } from './receptionist.js';
 
@@ -51,6 +55,8 @@ export interface PreparedSession {
   cal: CalComClient | null;
   calError: string | null;
   store: CallStore;
+  /** Whether booking really works, checked before the call starts. Defaults to available when not given. */
+  scheduling?: SchedulingStatus;
 }
 
 export interface SessionLimits {
@@ -64,6 +70,8 @@ export interface SessionLimits {
   tickMs: number;
   /** How long to wait for the call-log update when ending. */
   logTimeoutMs: number;
+  /** How long a booking waits for the caller's transcribed answer to a read-back to arrive. */
+  answerWaitMs: number;
   /** The person is told this long before the time limit or the idle limit ends the call. */
   warnMs: number;
   /** How many times a dropped Gemini connection is re-opened (resuming the same conversation). */
@@ -78,6 +86,7 @@ export const DEFAULT_LIMITS: SessionLimits = {
   setupTimeoutMs: 15_000,
   tickMs: 5_000,
   logTimeoutMs: 5_000,
+  answerWaitMs: 2_500,
   warnMs: 30_000,
   maxReconnects: 3,
   reconnectDelayMs: 500,
@@ -110,6 +119,11 @@ function closeDetail(code: number, reason: string): string {
   return ` (${code ? `code ${code}` : 'no code'}${text ? `: ${text}` : ''})`;
 }
 
+/** Longest single turn kept in a call's history, and how much of the call is kept in all. */
+const MAX_TURN_CHARS = 1_500;
+const MAX_LOG_CHARS = 120_000;
+const MAX_EVENTS = 100;
+
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -138,6 +152,17 @@ export class VoiceSession {
   private gate: ApprovalGate;
   private prepared: PreparedSession | null = null;
   private callId: string | null = null;
+  /** Whether this call's history row exists, and if not why not. Told to the browser so a failure is never silent. */
+  private history: CallHistory = { state: 'pending' };
+  private callStartedAt = new Date();
+  private callerName: string | null = null;
+  /** Everything said, in order, as it will be saved with the call. */
+  private readonly log: Array<{ role: 'user' | 'assistant'; text: string; at: string }> = [];
+  /** Things the receptionist did that are worth showing in the call's history. */
+  private readonly events: Array<{ text: string; at: string }> = [];
+  private readonly bookings = new BookingMemory();
+  /** What the caller has said since the last read-back began. */
+  private callerWords = '';
   private ready = false;
   private finished = false;
   private transferRequested = false;
@@ -197,13 +222,31 @@ export class VoiceSession {
     const prepared = await this.deps.prepare();
     if (this.finished) return;
     this.prepared = prepared;
+    this.callStartedAt = this.now();
 
-    const callIdPromise = prepared.store.createCall().catch(() => null);
+    const created = prepared.store.createCall({
+      started_at: this.callStartedAt.toISOString(),
+      metadata: { scheduling: this.scheduling() },
+    }).catch(() => ({ id: null, problem: 'The call history could not be saved.' }));
     try {
       await this.openInitial();
     } finally {
-      this.callId = await callIdPromise;
+      const result = await created;
+      this.callId = result.id;
+      this.history = result.id ? { state: 'saved' } : { state: 'not_saved', problem: result.problem ?? undefined };
+      this.sendCallInfo();
     }
+  }
+
+  private scheduling(): SchedulingStatus {
+    return this.prepared?.scheduling ?? { available: true };
+  }
+
+  private sendCallInfo(): void {
+    // Nothing to report for a call that never got as far as being set up.
+    if (!this.prepared) return;
+    const scheduling = this.scheduling();
+    this.send({ type: 'call_info', scheduling: { available: scheduling.available, ...(scheduling.reason ? { reason: scheduling.reason } : {}) }, history: this.history });
   }
 
   private setup(resumeHandle: string | null): string {
@@ -211,7 +254,7 @@ export class VoiceSession {
     return JSON.stringify(setupMessage({
       model: this.deps.model,
       voiceName: this.deps.voiceName,
-      systemInstruction: buildSystemInstruction(prepared.config, this.now()),
+      systemInstruction: buildSystemInstruction(prepared.config, this.now(), this.scheduling()),
       tools: TOOL_DECLARATIONS,
       resumeHandle,
       longSession: this.longSession,
@@ -508,6 +551,7 @@ export class VoiceSession {
   private appendTranscript(role: 'user' | 'assistant', fragment: string): void {
     if (this.current && this.current.role !== role) this.flushTranscript();
     this.current = { role, text: `${this.current?.text ?? ''}${fragment}` };
+    if (role === 'user') this.callerWords += fragment;
     this.send({ type: 'transcript', role, text: this.current.text, final: false });
   }
 
@@ -515,7 +559,26 @@ export class VoiceSession {
     if (!this.current) return;
     const { role, text } = this.current;
     this.current = null;
-    if (text.trim()) this.send({ type: 'transcript', role, text, final: true });
+    if (!text.trim()) return;
+    this.log.push({ role, text: text.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
+    this.send({ type: 'transcript', role, text, final: true });
+  }
+
+  /**
+   * What the caller has said since the last read-back began. The speech-to-text can arrive a moment after
+   * the model has already reacted to the audio, so wait briefly for it rather than treating silence as "no".
+   */
+  private async callerAnswer(): Promise<string> {
+    const deadline = Date.now() + this.limits.answerWaitMs;
+    while (!this.callerWords.trim() && Date.now() < deadline && !this.finished) await pause(100);
+    // A last short pause lets the rest of a sentence like "yes, that's right" arrive.
+    if (this.callerWords.trim()) await pause(Math.min(300, this.limits.answerWaitMs));
+    return this.callerWords;
+  }
+
+  private note(text: string): void {
+    this.touch();
+    if (this.events.length < MAX_EVENTS) this.events.push({ text: text.slice(0, 400), at: this.now().toISOString() });
   }
 
   private async handleToolCalls(calls: ToolCall[], epoch: number): Promise<void> {
@@ -529,6 +592,11 @@ export class VoiceSession {
       store: prepared.store,
       now: this.now,
       escalate: (reason) => this.escalate(reason),
+      bookings: this.bookings,
+      callerSaid: () => this.callerAnswer(),
+      beginReadback: () => { this.callerWords = ''; },
+      note: (text) => this.note(text),
+      setCallerName: (name) => { this.callerName = name; },
     };
     const results: ToolResult[] = [];
     for (const call of calls) {
@@ -608,28 +676,77 @@ export class VoiceSession {
     this.gate.denyAll();
     this.flushTranscript();
     if (failure) this.send({ type: 'error', message: failure });
-    this.send({ type: 'ended', reason });
-    this.closeQuietly(this.deps.client, failure ? SERVICE_CLOSE : NORMAL_CLOSE, failure ? 'Voice session failed' : 'Call ended');
     this.closeQuietly(this.gemini, NORMAL_CLOSE, 'Call ended');
     try {
-      await this.writeCallLog(Boolean(failure));
+      // The browser stays connected while the history is written, so the work is never cut off by the
+      // connection closing, and the browser can be told whether the call was saved.
+      await this.writeCallLog(reason, failure);
+      this.sendCallInfo();
+      this.send({ type: 'ended', reason });
+      this.closeQuietly(this.deps.client, failure ? SERVICE_CLOSE : NORMAL_CLOSE, failure ? 'Voice session failed' : 'Call ended');
     } finally {
       this.resolveDone();
     }
   }
 
-  private async writeCallLog(failed: boolean): Promise<void> {
+  /** The most recent thing worth knowing about how the call went, in one line. */
+  private outcome(failure?: string): string {
+    if (failure) return failure.slice(0, 300);
+    const last = this.events[this.events.length - 1];
+    if (last) return last.text.slice(0, 300);
+    if (this.transferRequested) return 'A member of staff was requested.';
+    if (!this.log.some((turn) => turn.role === 'user')) return 'The caller did not say anything.';
+    return 'Conversation only; nothing was booked.';
+  }
+
+  /** The conversation to save: the most recent part of it if it is very long. */
+  private savedTranscript(): { turns: Array<{ role: 'user' | 'assistant'; text: string; at: string }>; truncated: boolean } {
+    let budget = MAX_LOG_CHARS;
+    let first = this.log.length;
+    while (first > 0 && budget - this.log[first - 1]!.text.length >= 0) {
+      first -= 1;
+      budget -= this.log[first]!.text.length;
+    }
+    return { turns: this.log.slice(first), truncated: first > 0 };
+  }
+
+  private async writeCallLog(reason: EndReason, failure?: string): Promise<void> {
     const store = this.prepared?.store;
-    if (!store || !this.callId) return;
-    const fields = {
+    if (!store) return;
+    const saved = this.savedTranscript();
+    const fields: CallFields = {
       ended_at: this.now().toISOString(),
       // A requested human handoff keeps its status; only the end time is added.
-      ...(this.transferRequested ? {} : { status: failed ? 'error' as const : 'completed' as const }),
+      ...(this.transferRequested ? {} : { status: failure ? 'error' as const : 'completed' as const }),
+      ...(this.callerName ? { caller_name: this.callerName } : {}),
+      metadata: {
+        outcome: this.outcome(failure),
+        end_reason: reason,
+        ...(failure ? { failure: failure.slice(0, 400) } : {}),
+        scheduling: this.scheduling(),
+        duration_seconds: Math.max(0, Math.round((this.now().getTime() - this.callStartedAt.getTime()) / 1000)),
+        transcript: saved.turns,
+        ...(saved.truncated ? { transcript_truncated: true } : {}),
+        events: this.events,
+      },
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, this.limits.logTimeoutMs); });
+    const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), this.limits.logTimeoutMs); });
     try {
-      await Promise.race([store.updateCall(this.callId, fields), timeout]);
+      const work = (async (): Promise<boolean> => {
+        if (this.callId) return store.updateCall(this.callId, fields);
+        // The row could not be created when the call began (a database that was briefly unreachable, say),
+        // so try again now with everything, rather than lose the call.
+        const retried = await store.createCall({ ...fields, started_at: this.callStartedAt.toISOString() });
+        this.callId = retried.id;
+        if (!retried.id && retried.problem) this.history = { state: 'not_saved', problem: retried.problem };
+        return Boolean(retried.id);
+      })();
+      const result = await Promise.race([work, timeout]);
+      if (result === true) this.history = { state: 'saved' };
+      else if (this.history.state !== 'not_saved' || !this.history.problem) {
+        this.history = { state: 'not_saved', problem: result === 'timeout' ? 'Saving the call took too long, so it may not appear in Call activity.' : 'The call ended, but its history could not be saved. Check the clinic’s Supabase connection under Integrations.' };
+      }
     } finally {
       clearTimeout(timer);
     }

@@ -3,15 +3,15 @@ import { test } from 'node:test';
 import { ApprovalGate } from './approval.js';
 import { CalComClient, type Fetcher } from './calcom.js';
 import { normalizeClinicConfig } from './clinicConfig.js';
-import { TOOL_DECLARATIONS, buildSystemInstruction, runTool, type CallStore, type ToolDeps } from './receptionist.js';
+import { BookingMemory, TOOL_DECLARATIONS, buildSystemInstruction, runTool, type CallStore, type ToolDeps } from './receptionist.js';
 
 const NOW = new Date('2026-11-02T03:00:00Z');
 
 function makeStore() {
   const log: Array<[string, unknown]> = [];
   const store: CallStore = {
-    async createCall() { log.push(['createCall', null]); return 'call-1'; },
-    async updateCall(callId, fields) { log.push(['updateCall', { callId, fields }]); },
+    async createCall() { log.push(['createCall', null]); return { id: 'call-1', problem: null }; },
+    async updateCall(callId, fields) { log.push(['updateCall', { callId, fields }]); return true; },
     async recordAppointment(input) { log.push(['recordAppointment', input]); return true; },
     async updateAppointment(uid, status) { log.push(['updateAppointment', { uid, status }]); return true; },
     async recordReschedule(input) { log.push(['recordReschedule', input]); return true; },
@@ -25,6 +25,9 @@ interface Harness {
   prompts: Array<{ operation: string; summary: Record<string, string> }>;
   log: Array<[string, unknown]>;
   escalations: string[];
+  notes: string[];
+  /** What the caller says in answer to the next read-back. */
+  caller: { says: string };
   answerNext(approved: boolean): void;
 }
 
@@ -48,13 +51,20 @@ function harness(options: { responses?: unknown[]; cal?: boolean; autoApprove?: 
   }, 5000);
   const { store, log } = makeStore();
   const escalations: string[] = [];
+  const notes: string[] = [];
+  const caller = { says: '' };
   const cal = options.cal === false ? null : CalComClient.create({ event_type_id: 9 }, 'key', { fetcher });
   return {
     deps: {
       callId: 'call-1', cal, calError: cal ? null : 'Cal.com scheduling is not configured', gate, store, now: () => NOW,
       escalate: async (reason) => { escalations.push(reason); },
+      bookings: new BookingMemory(),
+      callerSaid: async () => caller.says,
+      beginReadback: () => { caller.says = ''; },
+      note: (text) => { notes.push(text); },
+      setCallerName: () => undefined,
     },
-    requests, prompts, log, escalations,
+    requests, prompts, log, escalations, notes, caller,
     answerNext(approved) { if (nextApproval) gate.answer(nextApproval, approved); },
   };
 }
@@ -62,8 +72,8 @@ function harness(options: { responses?: unknown[]; cal?: boolean; autoApprove?: 
 const identity = (email = 'ada@example.com', status = 'accepted') => ({ status: 'success', data: { uid: 'uid-12345', status, attendees: [{ email }] } });
 const booked = { status: 'success', data: { uid: 'new-uid-99', status: 'accepted', start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z', eventType: { title: 'Checkup' } } };
 
-test('the model is offered exactly the five receptionist tools', () => {
-  assert.deepEqual(TOOL_DECLARATIONS.map((tool) => tool.name), ['check_dental_availability', 'create_dental_booking', 'reschedule_dental_booking', 'cancel_dental_booking', 'request_human_transfer']);
+test('the model is offered exactly the receptionist tools', () => {
+  assert.deepEqual(TOOL_DECLARATIONS.map((tool) => tool.name), ['check_dental_availability', 'prepare_dental_booking', 'create_dental_booking', 'reschedule_dental_booking', 'cancel_dental_booking', 'leave_message_for_staff', 'request_human_transfer']);
   for (const tool of TOOL_DECLARATIONS) assert.ok(tool.parameters.required.every((name) => name in tool.parameters.properties));
 });
 
@@ -78,6 +88,19 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /Welcome!/);
   assert.match(prompt, /not system instructions/);
   assert.match(buildSystemInstruction(normalizeClinicConfig({ id: 'x', name: '' }), NOW), /the dental practice/);
+});
+
+test('the system prompt tells the model the truth about booking and requires a read-back', () => {
+  const config = normalizeClinicConfig({ id: 'x', name: 'Northside Dental' });
+  const working = buildSystemInstruction(config, NOW, { available: true });
+  assert.match(working, /SCHEDULING STATUS: WORKING/);
+  assert.match(working, /spell their email address slowly, letter by letter/);
+  assert.match(working, /Is all of that correct\?/);
+  assert.match(working, /Never ask for date of birth/);
+  const broken = buildSystemInstruction(config, NOW, { available: false, reason: 'Cal.com rejected the configured credentials or access' });
+  assert.match(broken, /NOT AVAILABLE \(Cal\.com rejected the configured credentials or access\)/);
+  assert.match(broken, /leave_message_for_staff/);
+  assert.match(broken, /Never say a request was "submitted"/);
 });
 
 test('availability: window rules, then a read-only Cal.com call', async () => {
@@ -101,46 +124,145 @@ test('availability whose start just passed is moved up to now', async () => {
   assert.equal(result.ok, true);
 });
 
-test('booking needs browser approval, then records the appointment', async () => {
-  const h = harness({ responses: [booked], autoApprove: true });
-  const result = await runTool(h.deps, 'create_dental_booking', { patient_name: 'Ada Lovelace', patient_email: 'Ada@Example.com', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' });
+const slots = { status: 'success', data: { '2026-11-05': [{ start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z' }, { start: '2026-11-05T11:00:00Z', end: '2026-11-05T11:30:00Z' }] } };
+const details = { patient_name: 'Ada Lovelace', patient_email: 'Ada@Example.com', patient_phone: '+1 415 555 0123', reason: 'Cleaning', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' };
+
+test('preparing reads the details back to be confirmed, and books nothing', async () => {
+  const h = harness({ responses: [slots] });
+  const result = await runTool(h.deps, 'prepare_dental_booking', details);
   assert.equal(result.ok, true);
-  assert.equal(result.dashboardNote, null);
-  assert.deepEqual(h.prompts, [{ operation: 'create_booking', summary: { patientName: 'Ada Lovelace', patientEmail: 'ada@example.com', when: 'Thursday, November 5, 2026 at 9:00 AM', timeZone: 'UTC' } }]);
-  assert.deepEqual(h.requests, ['POST /v2/bookings']);
-  const recorded = h.log.find(([name]) => name === 'recordAppointment')![1] as Record<string, unknown>;
-  assert.deepEqual({ ...recorded }, { bookingUid: 'new-uid-99', status: 'accepted', startsAt: '2026-11-05T09:00:00.000Z', endsAt: '2026-11-05T09:30:00.000Z', appointmentType: 'Checkup', attendeeName: 'Ada Lovelace', attendeeEmail: 'ada@example.com', callId: 'call-1' });
-});
-
-test('a refused or ignored approval changes nothing', async () => {
-  const refused = harness({ autoApprove: false });
-  const result = await runTool(refused.deps, 'create_dental_booking', { patient_name: 'Ada', patient_email: 'ada@example.com', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' });
-  assert.deepEqual(result, { ok: false, message: 'Booking was not approved in the browser.' });
-  assert.deepEqual(refused.requests, []);
-  assert.equal(refused.log.length, 0);
-});
-
-test('past or malformed booking input is refused before any prompt', async () => {
-  const h = harness({ autoApprove: true });
-  assert.equal((await runTool(h.deps, 'create_dental_booking', { patient_name: 'Ada', patient_email: 'ada@example.com', start: '2026-11-01T09:00:00Z', time_zone: 'UTC' })).ok, false);
-  assert.equal((await runTool(h.deps, 'create_dental_booking', { patient_name: '', patient_email: 'ada@example.com', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' })).ok, false);
-  assert.equal((await runTool(h.deps, 'create_dental_booking', { patient_name: 'Ada', patient_email: 'nope', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' })).ok, false);
+  assert.deepEqual(result.read_back, {
+    name: 'Ada Lovelace',
+    day_and_time: 'Thursday, November 5, 2026 at 9:00 AM',
+    phone_digits: '1 4 1 5 5 5 5 0 1 2 3',
+    email_spelled: 'a, d, a, at, e, x, a, m, p, l, e, dot, c, o, m',
+    reason: 'Cleaning',
+  });
+  assert.deepEqual(h.requests, ['GET /v2/slots']);
   assert.equal(h.prompts.length, 0);
 });
 
+test('a spoken email is understood, and one that is not an address is refused', async () => {
+  const spoken = harness({ responses: [slots] });
+  const ok = await runTool(spoken.deps, 'prepare_dental_booking', { ...details, patient_email: 'jacob dot k at gmail dot com' });
+  assert.equal(ok.ok, true);
+  assert.equal((ok.read_back as { email_spelled: string }).email_spelled, 'j, a, c, o, b, dot, k, at, gmail dot com');
+  const bad = await runTool(harness({ responses: [slots] }).deps, 'prepare_dental_booking', { ...details, patient_email: 'Ahorita.gmail.com' });
+  assert.equal(bad.ok, false);
+});
+
+test('a time that is not free is refused with the nearest free times', async () => {
+  const h = harness({ responses: [slots] });
+  const result = await runTool(h.deps, 'prepare_dental_booking', { ...details, start: '2026-11-05T09:15:00Z' });
+  assert.equal(result.ok, false);
+  assert.match(String(result.message), /Nearby times that are: Thursday, November 5, 2026 at 9:00 AM; Thursday, November 5, 2026 at 11:00 AM/);
+});
+
+test('booking waits for a clear yes, then needs browser approval, then records the appointment', async () => {
+  const h = harness({ responses: [slots, booked], autoApprove: true });
+  const prepared = await runTool(h.deps, 'prepare_dental_booking', details);
+  const ref = prepared.booking_ref as string;
+
+  assert.match(String((await runTool(h.deps, 'create_dental_booking', { booking_ref: ref })).message), /has not answered the read-back/);
+  h.caller.says = 'No, wait, the email is wrong';
+  assert.match(String((await runTool(h.deps, 'create_dental_booking', { booking_ref: ref })).message), /not clearly confirmed/);
+  assert.equal(h.prompts.length, 0, 'no prompt and no booking without a confirmation');
+
+  h.caller.says = 'Yes, that is all correct.';
+  const result = await runTool(h.deps, 'create_dental_booking', { booking_ref: ref });
+  assert.equal(result.ok, true);
+  assert.equal(result.dashboardNote, null);
+  assert.deepEqual(h.prompts, [{ operation: 'create_booking', summary: { patientName: 'Ada Lovelace', patientEmail: 'ada@example.com', patientPhone: '+14155550123', reason: 'Cleaning', when: 'Thursday, November 5, 2026 at 9:00 AM', timeZone: 'UTC' } }]);
+  assert.deepEqual(h.requests, ['GET /v2/slots', 'POST /v2/bookings']);
+  const recorded = h.log.find(([name]) => name === 'recordAppointment')![1] as Record<string, unknown>;
+  assert.deepEqual({ ...recorded }, { bookingUid: 'new-uid-99', status: 'accepted', startsAt: '2026-11-05T09:00:00.000Z', endsAt: '2026-11-05T09:30:00.000Z', appointmentType: 'Checkup', attendeeName: 'Ada Lovelace', attendeeEmail: 'ada@example.com', attendeePhone: '+14155550123', callId: 'call-1' });
+  assert.match(h.notes[0]!, /Booked Ada Lovelace for Thursday, November 5, 2026 at 9:00 AM/);
+});
+
+test('a correction means preparing again: the new details are read back and the old reference no longer books', async () => {
+  const h = harness({ responses: [slots, slots, booked], autoApprove: true });
+  const first = (await runTool(h.deps, 'prepare_dental_booking', details)).booking_ref as string;
+  h.caller.says = 'No, it is ada at example dot org';
+  assert.equal((await runTool(h.deps, 'create_dental_booking', { booking_ref: first })).ok, false);
+  const second = (await runTool(h.deps, 'prepare_dental_booking', { ...details, patient_email: 'ada at example dot org' })).booking_ref as string;
+  assert.notEqual(second, first);
+  assert.equal(h.caller.says, '', 'only what is said after the new read-back counts');
+  h.caller.says = 'Yes';
+  const result = await runTool(h.deps, 'create_dental_booking', { booking_ref: second });
+  assert.equal(result.ok, true);
+  assert.equal((h.prompts[0]!.summary as Record<string, string>).patientEmail, 'ada@example.org');
+});
+
+test('a booking reference works once', async () => {
+  const h = harness({ responses: [slots, booked], autoApprove: true });
+  const ref = (await runTool(h.deps, 'prepare_dental_booking', details)).booking_ref as string;
+  h.caller.says = 'Yes';
+  assert.equal((await runTool(h.deps, 'create_dental_booking', { booking_ref: ref })).ok, true);
+  assert.match(String((await runTool(h.deps, 'create_dental_booking', { booking_ref: ref })).message), /no prepared booking/);
+  assert.deepEqual(h.requests, ['GET /v2/slots', 'POST /v2/bookings']);
+});
+
+test('a refused or ignored approval changes nothing', async () => {
+  const refused = harness({ responses: [slots], autoApprove: false });
+  const ref = (await runTool(refused.deps, 'prepare_dental_booking', details)).booking_ref as string;
+  refused.caller.says = 'Yes';
+  const result = await runTool(refused.deps, 'create_dental_booking', { booking_ref: ref });
+  assert.equal(result.ok, false);
+  assert.match(String(result.message), /not approved in the browser/);
+  assert.deepEqual(refused.requests, ['GET /v2/slots']);
+  assert.equal(refused.log.length, 0);
+});
+
+test('past or malformed booking input is refused before anything is read back', async () => {
+  const h = harness({ autoApprove: true });
+  assert.equal((await runTool(h.deps, 'prepare_dental_booking', { ...details, start: '2026-11-01T09:00:00Z' })).ok, false);
+  assert.equal((await runTool(h.deps, 'prepare_dental_booking', { ...details, patient_name: '' })).ok, false);
+  assert.equal((await runTool(h.deps, 'prepare_dental_booking', { ...details, patient_email: 'nope' })).ok, false);
+  assert.equal((await runTool(h.deps, 'prepare_dental_booking', { ...details, patient_phone: '12' })).ok, false);
+  assert.equal(h.prompts.length, 0);
+  assert.deepEqual(h.requests, []);
+});
+
 test('a booking succeeds even if the dashboard record cannot be saved, and the model is told', async () => {
-  const h = harness({ responses: [booked], autoApprove: true });
+  const h = harness({ responses: [slots, booked], autoApprove: true });
   h.deps.store.recordAppointment = async () => false;
-  const result = await runTool(h.deps, 'create_dental_booking', { patient_name: 'Ada', patient_email: 'ada@example.com', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' });
+  const ref = (await runTool(h.deps, 'prepare_dental_booking', details)).booking_ref as string;
+  h.caller.says = 'Yes';
+  const result = await runTool(h.deps, 'create_dental_booking', { booking_ref: ref });
   assert.equal(result.ok, true);
   assert.match(String(result.dashboardNote), /could not be saved/);
 });
 
-test('rescheduling verifies identity before and after approval', async () => {
-  const h = harness({ responses: [identity(), identity(), { status: 'success', data: { uid: 'moved-uid-1', status: 'accepted', start: '2026-11-06T09:00:00Z' } }], autoApprove: true });
-  const result = await runTool(h.deps, 'reschedule_dental_booking', { booking_uid: 'uid-12345', patient_email: 'ada@example.com', new_start: '2026-11-06T09:00:00Z' });
+test('when Cal.com refuses the booking the model gets the reason, and nothing is recorded', async () => {
+  const h = harness({ autoApprove: true });
+  h.deps.cal = CalComClient.create({ event_type_id: 9 }, 'key', {
+    fetcher: async (input, init) => {
+      if (init?.method === 'POST') return new Response(JSON.stringify({ status: 'error', error: { message: 'Attendee phone number is invalid' } }), { status: 400 });
+      return new Response(JSON.stringify(slots), { status: 200 });
+    },
+  });
+  const ref = (await runTool(h.deps, 'prepare_dental_booking', details)).booking_ref as string;
+  h.caller.says = 'Yes';
+  const result = await runTool(h.deps, 'create_dental_booking', { booking_ref: ref });
+  assert.deepEqual(result, { ok: false, message: 'Cal.com refused the request: Attendee phone number is invalid' });
+  assert.equal(h.log.length, 0);
+});
+
+test('leaving a message saves it to the call and says plainly that nobody was called', async () => {
+  const h = harness({ cal: false });
+  const result = await runTool(h.deps, 'leave_message_for_staff', { caller_name: 'Ada', message: 'Wants a cleaning Friday', caller_phone: '+14155550123', preferred_time: 'mornings' });
   assert.equal(result.ok, true);
-  assert.deepEqual(h.requests, ['GET /v2/bookings/uid-12345', 'GET /v2/bookings/uid-12345', 'POST /v2/bookings/uid-12345/reschedule']);
+  assert.match(String(result.message), /Nobody has been called/);
+  assert.equal(h.notes[0], 'Message for staff from Ada: Wants a cleaning Friday (phone +14155550123; suits them: mornings)');
+  assert.deepEqual(h.escalations, ['Message from Ada: Wants a cleaning Friday']);
+});
+
+test('rescheduling verifies identity before and after approval', async () => {
+  const free = { status: 'success', data: { '2026-11-06': [{ start: '2026-11-06T09:00:00Z', end: '2026-11-06T09:30:00Z' }] } };
+  const h = harness({ responses: [identity(), free, identity(), { status: 'success', data: { uid: 'moved-uid-1', status: 'accepted', start: '2026-11-06T09:00:00Z' } }], autoApprove: true });
+  const result = await runTool(h.deps, 'reschedule_dental_booking', { booking_uid: 'uid-12345', patient_email: 'ada at example dot com', new_start: '2026-11-06T09:00:00Z', time_zone: 'UTC' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(h.requests, ['GET /v2/bookings/uid-12345', 'GET /v2/slots', 'GET /v2/bookings/uid-12345', 'POST /v2/bookings/uid-12345/reschedule']);
   assert.deepEqual(h.log.find(([name]) => name === 'recordReschedule')![1], { oldBookingUid: 'uid-12345', newBookingUid: 'moved-uid-1', startsAt: '2026-11-06T09:00:00.000Z', callId: 'call-1' });
 });
 

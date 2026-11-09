@@ -14,6 +14,11 @@ export const CLIENT_CHUNK_MS = 100;
 /** The agent rejects any single audio frame larger than this. */
 export const MAX_CLIENT_AUDIO_FRAME_BYTES = 64 * 1024;
 
+/** Whether the receptionist can really book appointments on this call, and if not, why. */
+export interface CallScheduling { available: boolean; reason?: string }
+/** Whether this call is being saved to the clinic's call history, and if not, why. `pending` until known. */
+export interface CallHistory { state: 'pending' | 'saved' | 'not_saved'; problem?: string }
+
 export type ApprovalOperation = 'create_booking' | 'reschedule_booking' | 'cancel_booking';
 export type EndReason = 'client' | 'time_limit' | 'idle' | 'admin' | 'service';
 
@@ -26,6 +31,7 @@ export type AgentMessage =
   | { type: 'approval_closed'; approvalId: string }
   | { type: 'escalation'; reason: string }
   | { type: 'notice'; message: string }
+  | { type: 'call_info'; scheduling: CallScheduling; history: CallHistory }
   | { type: 'error'; message: string }
   | { type: 'ended'; reason: EndReason };
 
@@ -75,6 +81,17 @@ export function parseAgentMessage(text: string): AgentMessage | null {
       return typeof data.approvalId === 'string' ? { type: 'approval_closed', approvalId: data.approvalId } : null;
     case 'escalation':
       return { type: 'escalation', reason: typeof data.reason === 'string' ? data.reason : '' };
+    case 'call_info': {
+      const scheduling = record(data.scheduling);
+      const history = record(data.history);
+      if (!scheduling || !history || typeof scheduling.available !== 'boolean') return null;
+      if (history.state !== 'pending' && history.state !== 'saved' && history.state !== 'not_saved') return null;
+      return {
+        type: 'call_info',
+        scheduling: { available: scheduling.available, ...(typeof scheduling.reason === 'string' ? { reason: scheduling.reason.slice(0, 400) } : {}) },
+        history: { state: history.state, ...(typeof history.problem === 'string' ? { problem: history.problem.slice(0, 400) } : {}) },
+      };
+    }
     case 'notice':
     case 'error':
       return typeof data.message === 'string' ? { type: data.type, message: data.message } : null;

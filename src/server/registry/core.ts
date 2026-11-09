@@ -36,6 +36,11 @@ export interface NewCompany {
 export type CompanyChanges = Partial<Pick<Company,
   'name' | 'business_type' | 'timezone' | 'is_active' | 'receptionist_config' | 'agent_status' | 'integration_status'>>;
 
+/** Everything the registry holds, for a downloadable backup. Credentials stay encrypted. */
+export interface BackupData { companies: Company[]; secrets: SecretRecord[] }
+
+export interface RestoreResult { restored: number; skipped: number; renamed: number }
+
 export type CreateResult = { ok: true; company: Company } | { ok: false; reason: 'slug_taken' };
 
 export interface RegistryApi {
@@ -46,6 +51,8 @@ export interface RegistryApi {
   getSecretRecord(id: string): Promise<SecretRecord | null>;
   putSecretRecord(id: string, record: Pick<SecretRecord, 'ciphertext' | 'nonce' | 'key_version'>): Promise<void>;
   deleteSecretRecord(id: string): Promise<void>;
+  exportAll(): Promise<BackupData>;
+  importAll(data: BackupData): Promise<RestoreResult>;
 }
 
 const COMPANY_PREFIX = 'company:';
@@ -111,6 +118,38 @@ export class RegistryCore implements RegistryApi {
 
   async deleteSecretRecord(id: string): Promise<void> {
     await this.store.delete(`${SECRET_PREFIX}${id}`);
+  }
+
+  async exportAll(): Promise<BackupData> {
+    return {
+      companies: await this.listCompanies(),
+      secrets: await this.store.list<SecretRecord>(SECRET_PREFIX),
+    };
+  }
+
+  /**
+   * Add clinics from a backup. A clinic that already exists is never overwritten, and a service name that is
+   * already taken by a different clinic gets a number added, so a restore can only ever add.
+   */
+  async importAll(data: BackupData): Promise<RestoreResult> {
+    const existing = await this.store.list<Company>(COMPANY_PREFIX);
+    const ids = new Set(existing.map((company) => company.id));
+    const slugs = new Set(existing.map((company) => company.slug));
+    const secrets = new Map(data.secrets.map((record) => [record.tenant_id, record]));
+    const result: RestoreResult = { restored: 0, skipped: 0, renamed: 0 };
+    for (const company of data.companies) {
+      if (ids.has(company.id)) { result.skipped += 1; continue; }
+      let slug = company.slug;
+      for (let n = 2; slugs.has(slug); n += 1) slug = `${company.slug}-${n}`;
+      if (slug !== company.slug) result.renamed += 1;
+      await this.store.put(`${COMPANY_PREFIX}${company.id}`, { ...company, slug });
+      const record = secrets.get(company.id);
+      if (record) await this.store.put(`${SECRET_PREFIX}${company.id}`, record);
+      ids.add(company.id);
+      slugs.add(slug);
+      result.restored += 1;
+    }
+    return result;
   }
 }
 

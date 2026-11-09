@@ -15,6 +15,16 @@ export type TenantProviderSecrets = Partial<Record<ProviderSecretKey, string>>;
 export type ProviderSecretUpdate = Partial<Record<ProviderSecretKey, string | null>>;
 export type ProviderSecretConfiguredFlags = Record<ProviderSecretKey, boolean>;
 
+/** The stored credentials exist but this Worker cannot decrypt them (the encryption key is not the one that saved them). */
+export class SecretsUnreadableError extends Error {
+  constructor() {
+    super('Could not decrypt stored provider secrets. Verify the encryption key and stored record.');
+    this.name = 'SecretsUnreadableError';
+  }
+}
+
+export const SECRETS_UNREADABLE_PROBLEM = 'The saved key could not be read, because this Worker’s TENANT_CREDENTIALS_ENCRYPTION_KEY is not the one that saved it. Enter the key again here; the clinic and all its settings are kept.';
+
 const KEY_VERSION = 1;
 const NONCE_BYTES = 12;
 const AUTH_TAG_BYTES = 16;
@@ -87,15 +97,17 @@ async function decryptRecord(
   tenantId: string,
   record: { ciphertext: string; nonce: string; key_version: number },
 ): Promise<TenantProviderSecrets> {
-  if (record.key_version !== KEY_VERSION) {
-    throw new Error(`Unsupported provider-secret key version: ${record.key_version}.`);
-  }
+  if (record.key_version !== KEY_VERSION) throw new SecretsUnreadableError();
 
-  const nonce = decodeBase64Url(record.nonce, 'nonce');
-  const encrypted = decodeBase64Url(record.ciphertext, 'ciphertext');
-  if (nonce.length !== NONCE_BYTES || encrypted.length <= AUTH_TAG_BYTES) {
-    throw new Error('Stored provider secret payload is invalid.');
+  let nonce: Buffer;
+  let encrypted: Buffer;
+  try {
+    nonce = decodeBase64Url(record.nonce, 'nonce');
+    encrypted = decodeBase64Url(record.ciphertext, 'ciphertext');
+  } catch {
+    throw new SecretsUnreadableError();
   }
+  if (nonce.length !== NONCE_BYTES || encrypted.length <= AUTH_TAG_BYTES) throw new SecretsUnreadableError();
 
   try {
     const plaintext = await globalThis.crypto.subtle.decrypt({
@@ -108,7 +120,7 @@ async function decryptRecord(
     return validateTenantSecrets(JSON.parse(decoded) as unknown);
   } catch {
     // Do not expose secret material, authentication details, or crypto-library errors.
-    throw new Error('Could not decrypt stored provider secrets. Verify the encryption key and stored record.');
+    throw new SecretsUnreadableError();
   }
 }
 
@@ -135,13 +147,30 @@ export async function readTenantProviderSecrets(tenantId: string): Promise<Tenan
   return record ? await decryptRecord(tenantId, record) : {};
 }
 
-/** Merge a partial credential update, persist only encrypted material, and return presence flags. */
+/**
+ * Like `readTenantProviderSecrets`, but a clinic whose saved keys cannot be decrypted is reported as
+ * `unreadable` instead of failing. The clinic itself is still fine; only its keys need entering again.
+ */
+export async function readTenantProviderSecretsSafe(tenantId: string): Promise<{ secrets: TenantProviderSecrets; unreadable: boolean }> {
+  try {
+    return { secrets: await readTenantProviderSecrets(tenantId), unreadable: false };
+  } catch (error) {
+    if (error instanceof SecretsUnreadableError) return { secrets: {}, unreadable: true };
+    throw error;
+  }
+}
+
+/**
+ * Merge a partial credential update, persist only encrypted material, and return presence flags.
+ * Keys that can no longer be read are dropped rather than blocking the save, so a clinic can always be
+ * repaired by entering its keys again.
+ */
 export async function mergeAndEncryptTenantProviderSecrets(
   tenantId: string,
   update: ProviderSecretUpdate,
 ): Promise<ProviderSecretConfiguredFlags> {
   tenantContext(tenantId);
-  const current = await readTenantProviderSecrets(tenantId);
+  const current = (await readTenantProviderSecretsSafe(tenantId)).secrets;
   const merged: TenantProviderSecrets = { ...current };
 
   for (const [key, value] of Object.entries(update)) {

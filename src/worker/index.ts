@@ -36,6 +36,8 @@ configureRegistry({
   getSecretRecord: (id) => registryStub().getSecretRecord(id) as ReturnType<Registry['getSecretRecord']>,
   putSecretRecord: (id, record) => registryStub().putSecretRecord(id, record),
   deleteSecretRecord: (id) => registryStub().deleteSecretRecord(id),
+  exportAll: () => registryStub().exportAll() as ReturnType<Registry['exportAll']>,
+  importAll: (data) => registryStub().importAll(data) as ReturnType<Registry['importAll']>,
 });
 
 configureClinicAgentRuntime({

@@ -6,18 +6,21 @@ import { requirePlatformAdmin, requireTenantRole, requireUser } from '../auth/au
 import { assertTrustedOrigin, login, logout } from '../auth/passcode.js';
 import {
   createCompany,
+  exportBackup,
   getCompany,
   listCompanies,
+  restoreBackup,
   updateCompany,
   updateIntegrationStatus,
 } from '../registry/index.js';
 import {
   clearTenantProviderSecrets,
   mergeAndEncryptTenantProviderSecrets,
-  readTenantProviderSecrets,
+  readTenantProviderSecretsSafe,
+  SECRETS_UNREADABLE_PROBLEM,
   type ProviderSecretUpdate,
 } from '../integrations/tenantProviderSecrets.js';
-import { clinicDatabase, getUsageSummary, listRecentCalls } from '../integrations/clinicDatabase.js';
+import { DatabaseAdviceError, clinicDatabase, getCallDetail, getUsageSummary, listRecentCalls } from '../integrations/clinicDatabase.js';
 import type { CalSelector } from '../integrations/calcomSelector.js';
 import { cleanKnowledgeFile, cleanKnowledgeText } from '../integrations/knowledge.js';
 import { parseEventTypeId, setupCalendar, setupDatabase, setupGemini, type ProviderResult } from '../integrations/providerSetup.js';
@@ -31,15 +34,21 @@ export const apiRouter = Router();
 const isProvisioned = (company: Company): boolean => company.agent_status === 'live';
 
 const DEFAULT_GREETING = 'Thank you for calling. How can I help you today?';
+const DATABASE_NOT_CONNECTED = 'No Supabase database is connected to this clinic yet, so call history is not saved. Add it under Integrations → Clinic Supabase database.';
 const DATABASE_UNREADABLE = 'Could not read this clinic’s Supabase database. Check the connection under Integrations.';
 
 /** Why the clinic's database cannot be read: what the last check found, or a general message. */
 async function databaseProblem(id: string): Promise<string> {
   try {
+    const saved = await readTenantProviderSecretsSafe(id);
+    if (saved.unreadable) return SECRETS_UNREADABLE_PROBLEM;
+    if (!saved.secrets.supabaseUrl || !saved.secrets.supabaseSecretKey) return DATABASE_NOT_CONNECTED;
     const status = nestedRecord(nestedRecord((await getCompany(id)).integration_status).supabase);
     return typeof status.problem === 'string' && status.problem ? status.problem : DATABASE_UNREADABLE;
   } catch { return DATABASE_UNREADABLE; }
 }
+
+const PROVIDERS = ['gemini', 'calcom', 'supabase', 'twilio'] as const;
 
 function tenantId(req: Request): string {
   const raw = req.params.tenantId;
@@ -90,6 +99,56 @@ apiRouter.post('/auth/logout', asyncRoute(async (req, res) => { logout(req, res)
 apiRouter.get('/tenants', asyncRoute(async (req, res) => {
   await requirePlatformAdmin(req);
   res.json({ tenants: await listCompanies() });
+}));
+
+/**
+ * A downloadable copy of every clinic and its settings, with each clinic's provider keys still encrypted
+ * (they can only be read by a Worker with the same TENANT_CREDENTIALS_ENCRYPTION_KEY). Restoring only ever
+ * adds clinics that are missing.
+ */
+const BACKUP_APP = 'metisai-clinics';
+
+apiRouter.get('/backup', asyncRoute(async (req, res) => {
+  await requirePlatformAdmin(req);
+  const data = await exportBackup();
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Disposition', `attachment; filename="metisai-clinics-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.json({ app: BACKUP_APP, version: 1, exported_at: new Date().toISOString(), ...data });
+}));
+
+const uuidText = z.string().regex(UUID_PATTERN);
+const restoreSchema = z.object({
+  app: z.literal(BACKUP_APP),
+  version: z.literal(1),
+  companies: z.array(z.object({
+    id: uuidText,
+    slug: z.string().min(1).max(120),
+    name: z.string().min(1).max(200),
+    business_type: z.string().max(80),
+    is_active: z.boolean(),
+    timezone: z.string().max(64),
+    receptionist_config: z.record(z.string(), z.unknown()),
+    agent_status: z.enum(['not_created', 'live', 'failed']),
+    integration_status: z.record(z.string(), z.object({ configured: z.boolean() }).passthrough()),
+    created_at: z.string().max(40),
+    updated_at: z.string().max(40),
+  })).max(200),
+  secrets: z.array(z.object({
+    tenant_id: uuidText,
+    ciphertext: z.string().max(200_000),
+    nonce: z.string().max(64),
+    key_version: z.number().int().positive(),
+    created_at: z.string().max(40),
+    updated_at: z.string().max(40),
+  })).max(200),
+}).passthrough();
+
+apiRouter.post('/backup/restore', asyncRoute(async (req, res) => {
+  await requirePlatformAdmin(req);
+  const parsed = restoreSchema.safeParse(req.body);
+  if (!parsed.success) throw new HttpError(400, 'That file is not a clinic backup from this console. Choose a file downloaded with Download backup.');
+  const result = await restoreBackup({ companies: parsed.data.companies as Company[], secrets: parsed.data.secrets });
+  res.json({ ...result, tenants: await listCompanies() });
 }));
 
 /** A string that is cut to a length instead of being refused for being too long. */
@@ -261,14 +320,14 @@ apiRouter.get('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   const id = tenantId(req);
   await requireTenantRole(req, id);
   const company = await getCompany(id);
-  res.json({
-    integrations: {
-      gemini: configuredStatus(company, 'gemini'),
-      calcom: configuredStatus(company, 'calcom'),
-      supabase: configuredStatus(company, 'supabase'),
-      twilio: configuredStatus(company, 'twilio'),
-    },
-  });
+  // If the Worker's encryption key is not the one that saved this clinic's keys, say so on every provider
+  // that had a key, instead of showing them as working.
+  const { unreadable } = await readTenantProviderSecretsSafe(id);
+  const status = (provider: string): IntegrationState => {
+    const entry = configuredStatus(company, provider);
+    return unreadable && entry.configured ? { ...entry, configured: false, problem: SECRETS_UNREADABLE_PROBLEM } : entry;
+  };
+  res.json({ integrations: Object.fromEntries(PROVIDERS.map((provider) => [provider, status(provider)])) });
 }));
 
 const integrationUpdateSchema = z.object({
@@ -294,7 +353,7 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   try { assertServerConfig(); } catch (error) {
     throw new HttpError(503, error instanceof Error ? error.message : 'The server configuration is incomplete.');
   }
-  const stored = await readTenantProviderSecrets(id);
+  const { secrets: stored, unreadable } = await readTenantProviderSecretsSafe(id);
   let result: ProviderResult;
 
   if (input.provider === 'gemini') {
@@ -328,6 +387,16 @@ apiRouter.put('/tenants/:tenantId/integrations', asyncRoute(async (req, res) => 
   if (input.provider === 'gemini' && result.secrets.geminiApiKey) changes.agent_status = 'live';
   if (Object.keys(changes).length) await updateCompany(id, changes);
   await updateIntegrationStatus(id, input.provider, result.status);
+  if (unreadable) {
+    // The old keys could not be read and were dropped to make this save possible. Mark every other
+    // provider that had one as needing its key again, so nothing looks connected when it is not.
+    for (const provider of PROVIDERS) {
+      const entry = configuredStatus(company, provider);
+      if (provider === input.provider || !entry.configured) continue;
+      await updateIntegrationStatus(id, provider, { ...entry, configured: false, problem: SECRETS_UNREADABLE_PROBLEM });
+    }
+    if (input.provider !== 'gemini') await updateCompany(id, { agent_status: 'not_created' });
+  }
   if (secretChanged || input.provider === 'calcom') await endClinicCall(id);
   const message = input.provider !== 'gemini' && !isProvisioned(company) && !stored.geminiApiKey
     ? `${result.message} The voice agent stays off until a Gemini API key is added.`
@@ -419,8 +488,26 @@ apiRouter.get('/tenants/:tenantId/calls', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requireTenantRole(req, id);
   const db = await clinicDatabase(id);
-  if (!db) return res.json({ calls: [], connected: false });
-  let calls: unknown[];
-  try { calls = await listRecentCalls(db, id); } catch { return res.json({ calls: [], connected: false, problem: await databaseProblem(id) }); }
+  if (!db) return res.json({ calls: [], connected: false, problem: await databaseProblem(id) });
+  let calls: Awaited<ReturnType<typeof listRecentCalls>>;
+  try { calls = await listRecentCalls(db, id); } catch (error) {
+    return res.json({ calls: [], connected: false, problem: error instanceof DatabaseAdviceError ? error.message : await databaseProblem(id) });
+  }
   res.json({ calls, connected: true });
+}));
+
+apiRouter.get('/tenants/:tenantId/calls/:callId', asyncRoute(async (req, res) => {
+  const id = tenantId(req);
+  await requireTenantRole(req, id);
+  const callId = String(req.params.callId ?? '');
+  if (!UUID_PATTERN.test(callId)) throw new HttpError(400, 'The call identifier is invalid.');
+  const db = await clinicDatabase(id);
+  if (!db) throw new HttpError(409, await databaseProblem(id));
+  let call: Awaited<ReturnType<typeof getCallDetail>>;
+  try { call = await getCallDetail(db, id, callId); } catch (error) {
+    throw new HttpError(502, error instanceof DatabaseAdviceError ? error.message : await databaseProblem(id));
+  }
+  if (!call) throw new HttpError(404, 'That call was not found for this clinic.');
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ call });
 }));

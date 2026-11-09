@@ -94,11 +94,12 @@ export class CalComClient {
       throw new CalComError('Cal.com could not be reached');
     }
     if (response.status >= 400) {
-      await response.body?.cancel().catch(() => undefined);
+      const detail = await providerDetail(response, this.apiKey);
       if (response.status === 401 || response.status === 403) throw new CalComError('Cal.com rejected the configured credentials or access');
       if (response.status === 404) throw new CalComError('The requested Cal.com record was not found');
       if (response.status === 409) throw new CalComError('The requested appointment slot is no longer available');
       if (response.status === 429) throw new CalComError('Cal.com rate limit reached; try again shortly');
+      if (response.status === 400 || response.status === 422) throw new CalComError(detail ? `Cal.com refused the request: ${detail}` : 'Cal.com refused the request');
       throw new CalComError('Cal.com could not complete the scheduling request');
     }
     let payload: unknown;
@@ -123,12 +124,20 @@ export class CalComClient {
     return data;
   }
 
-  async createBooking(input: { name: string; email: string; start: Date; timeZone: string }): Promise<Record<string, unknown>> {
+  async createBooking(input: { name: string; email: string; start: Date; timeZone: string; phone?: string; reason?: string }): Promise<Record<string, unknown>> {
     const { data } = await this.request('POST', '/bookings', '2026-02-25', {
       body: {
         ...this.eventBody(),
         start: utcIso(input.start),
-        attendee: { name: input.name, email: input.email, timeZone: input.timeZone, language: 'en' },
+        attendee: {
+          name: input.name,
+          email: input.email,
+          timeZone: input.timeZone,
+          language: 'en',
+          ...(input.phone ? { phoneNumber: input.phone } : {}),
+        },
+        // Cal.com stores metadata as short text values; the reason shows up on the booking for the front desk.
+        ...(input.reason ? { metadata: { reason: input.reason.slice(0, 200), source: 'metisai-receptionist' } } : { metadata: { source: 'metisai-receptionist' } }),
       },
     });
     return summarize(data);
@@ -170,6 +179,25 @@ export class CalComClient {
       body: { cancellationReason: reason },
     });
     return summarize(data);
+  }
+}
+
+/** A short, safe sentence from a Cal.com error body, for the receptionist to act on. Never includes credentials. */
+async function providerDetail(response: Response, secret: string): Promise<string | null> {
+  let text = '';
+  try {
+    text = (await response.text()).slice(0, 4000);
+  } catch {
+    return null;
+  }
+  try {
+    const body = JSON.parse(text) as { message?: unknown; error?: { message?: unknown } | string };
+    const raw = body.error && typeof body.error === 'object' ? body.error.message : typeof body.error === 'string' ? body.error : body.message;
+    const message = Array.isArray(raw) ? raw.filter((item) => typeof item === 'string').join('; ') : raw;
+    if (typeof message !== 'string' || !message.trim()) return null;
+    return message.split(secret).join('[hidden]').replace(/(cal_(live|test)_|Bearer\s+)\S+/gi, '[hidden]').replace(/\s+/g, ' ').trim().slice(0, 200);
+  } catch {
+    return null;
   }
 }
 

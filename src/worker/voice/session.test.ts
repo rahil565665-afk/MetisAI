@@ -30,11 +30,14 @@ async function until(condition: () => boolean, label: string) {
   assert.fail(`timed out waiting for: ${label}`);
 }
 
-function makeStore() {
+function makeStore(options: { createProblem?: string; updateFails?: boolean } = {}) {
   const calls: Array<[string, any]> = [];
   const store: CallStore = {
-    async createCall() { calls.push(['createCall', null]); return 'call-1'; },
-    async updateCall(callId, fields) { calls.push(['updateCall', { callId, ...fields }]); },
+    async createCall(initial) {
+      calls.push(['createCall', initial ?? null]);
+      return options.createProblem ? { id: null, problem: options.createProblem } : { id: 'call-1', problem: null };
+    },
+    async updateCall(callId, fields) { calls.push(['updateCall', { callId, ...fields }]); return !options.updateFails; },
     async recordAppointment(input) { calls.push(['recordAppointment', input]); return true; },
     async updateAppointment(uid, status) { calls.push(['updateAppointment', { uid, status }]); return true; },
     async recordReschedule(input) { calls.push(['recordReschedule', input]); return true; },
@@ -52,10 +55,10 @@ interface Rig {
   connectedWith: string[];
 }
 
-function rig(options: { cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; more?: FakeSocket[]; approvalTimeoutMs?: number } = {}): Rig {
+function rig(options: { createProblem?: string; updateFails?: boolean; scheduling?: PreparedSession['scheduling']; cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; more?: FakeSocket[]; approvalTimeoutMs?: number } = {}): Rig {
   const client = new FakeSocket();
   const gemini = new FakeSocket();
-  const { store, calls } = makeStore();
+  const { store, calls } = makeStore(options);
   const calRequests: string[] = [];
   const queue = [...(options.cal ?? [])];
   const fetcher: Fetcher = async (input, init) => {
@@ -67,12 +70,12 @@ function rig(options: { cal?: Array<unknown>; limits?: SessionDeps['limits']; pr
   const connectedWith: string[] = [];
   const session = new VoiceSession({
     client,
-    prepare: options.prepare ?? (async () => ({ config, geminiApiKey: 'gem-key', cal: CalComClient.create({ event_type_id: 9 }, 'k', { fetcher }), calError: null, store })),
+    prepare: options.prepare ?? (async () => ({ config, geminiApiKey: 'gem-key', cal: CalComClient.create({ event_type_id: 9 }, 'k', { fetcher }), calError: null, store, scheduling: options.scheduling })),
     connectGemini: options.connect ?? (async (key) => { connectedWith.push(key); return connectedWith.length === 1 ? gemini : (options.more?.shift() ?? gemini); }),
     model: 'models/test-live',
     voiceName: 'Puck',
     now: () => NOW,
-    limits: { tickMs: 10, logTimeoutMs: 200, reconnectDelayMs: 1, ...options.limits },
+    limits: { tickMs: 10, logTimeoutMs: 200, reconnectDelayMs: 1, answerWaitMs: 30, ...options.limits },
     approvalTimeoutMs: options.approvalTimeoutMs ?? 2000,
     newApprovalId: (() => { let n = 0; return () => `approval-${++n}`; })(),
   });
@@ -96,7 +99,7 @@ test('connects with the clinic key, sends setup, then greets once Gemini is read
   assert.equal(setup.model, 'models/test-live');
   assert.equal(setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Puck');
   assert.match(setup.systemInstruction.parts[0].text, /Northside Dental/);
-  assert.equal(setup.tools[0].functionDeclarations.length, 5);
+  assert.equal(setup.tools[0].functionDeclarations.length, 7);
   assert.equal(r.client.json.some((message) => message.type === 'ready'), false, 'not ready before Gemini accepts the setup');
 
   r.gemini.receive({ setupComplete: {} });
@@ -173,74 +176,253 @@ test('an interruption flushes the transcript and tells the browser to stop playb
 });
 
 const booking = { status: 'success', data: { uid: 'new-uid-99', status: 'accepted', start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z', eventType: { title: 'Checkup' } } };
-const bookCall = (id = 'call-a') => ({ toolCall: { functionCalls: [{ id, name: 'create_dental_booking', args: { patient_name: 'Ada', patient_email: 'ada@example.com', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' } }] } });
+const slots = { status: 'success', data: { '2026-11-05': [{ start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z' }, { start: '2026-11-05T10:00:00Z', end: '2026-11-05T10:30:00Z' }] } };
+const prepareArgs = { patient_name: 'Ada Lovelace', patient_email: 'ada at example dot com', patient_phone: '+1 415 555 0123', reason: 'Cleaning', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' };
+const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({ toolCall: { functionCalls: [{ id, name, args }] } });
+const toolResponses = (r: Rig) => r.gemini.json.filter((message) => message.toolResponse).map((message) => message.toolResponse.functionResponses[0]);
+const say = (r: Rig, text: string) => r.gemini.receive({ serverContent: { inputTranscription: { text } } });
 
-test('an approved booking prompts the browser, books, logs it, and answers the model', async () => {
+/** The caller asks for a booking and the receptionist prepares it; returns the reference to read back. */
+async function prepared(r: Rig, args: Record<string, unknown> = prepareArgs): Promise<string> {
+  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', args));
+  await until(() => toolResponses(r).some((response) => response.id === 'prep-1'), 'prepare response');
+  const response = toolResponses(r).find((item) => item.id === 'prep-1').response;
+  assert.equal(response.ok, true, JSON.stringify(response));
+  return response.booking_ref as string;
+}
+const createCall = (ref: string, id = 'call-a') => toolCall(id, 'create_dental_booking', { booking_ref: ref });
+
+test('preparing a booking checks the time is free, and reads back the details to confirm, booking nothing', async () => {
+  const r = rig({ cal: [slots] });
+  await ready(r);
+  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', prepareArgs));
+  await until(() => toolResponses(r).length === 1, 'prepare response');
+  const { response } = toolResponses(r)[0];
+  assert.equal(response.ok, true);
+  assert.equal(response.read_back.name, 'Ada Lovelace');
+  assert.equal(response.read_back.email_spelled, 'a, d, a, at, e, x, a, m, p, l, e, dot, c, o, m');
+  assert.equal(response.read_back.phone_digits, '1 4 1 5 5 5 5 0 1 2 3');
+  assert.match(response.next_step, /Nothing is booked yet/);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots'], 'only availability is read');
+  assert.equal(r.client.json.some((message) => message.type === 'approval_request'), false);
+  await r.session.end('client');
+});
+
+test('a time Cal.com is not offering is refused, with the nearest free times', async () => {
+  const r = rig({ cal: [slots] });
+  await ready(r);
+  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', { ...prepareArgs, start: '2026-11-05T09:15:00Z' }));
+  await until(() => toolResponses(r).length === 1, 'prepare response');
+  const { response } = toolResponses(r)[0];
+  assert.equal(response.ok, false);
+  assert.match(response.message, /not available/);
+  assert.match(response.message, /9:00 AM/);
+  await r.session.end('client');
+});
+
+test('an email that is not an address is refused before anything is read back', async () => {
+  const r = rig({ cal: [slots] });
+  await ready(r);
+  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', { ...prepareArgs, patient_email: 'Ahorita.gmail.com' }));
+  await until(() => toolResponses(r).length === 1, 'prepare response');
+  assert.equal(toolResponses(r)[0].response.ok, false);
+  assert.deepEqual(r.calRequests, []);
+  await r.session.end('client');
+});
+
+test('booking is refused until the caller has answered the read-back', async () => {
+  const r = rig({ cal: [slots, booking] });
+  await ready(r);
+  const ref = await prepared(r);
+  r.gemini.receive(createCall(ref));
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'create response');
+  const { response } = toolResponses(r).find((item) => item.id === 'call-a');
+  assert.equal(response.ok, false);
+  assert.match(response.message, /has not answered the read-back/);
+  assert.equal(r.client.json.some((message) => message.type === 'approval_request'), false);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
+  await r.session.end('client');
+});
+
+test('what the caller said before the read-back does not count as confirming it', async () => {
+  const r = rig({ cal: [slots, booking] });
+  await ready(r);
+  say(r, 'Yes, I would like to book an appointment.');
+  const ref = await prepared(r);
+  r.gemini.receive(createCall(ref));
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'create response');
+  assert.match(toolResponses(r).find((item) => item.id === 'call-a').response.message, /has not answered the read-back/);
+  await r.session.end('client');
+});
+
+test('a correction instead of a yes refuses the booking and asks to prepare it again', async () => {
+  const r = rig({ cal: [slots, booking] });
+  await ready(r);
+  const ref = await prepared(r);
+  say(r, 'No, the email is wrong.');
+  r.gemini.receive(createCall(ref));
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'create response');
+  const { response } = toolResponses(r).find((item) => item.id === 'call-a');
+  assert.equal(response.ok, false);
+  assert.match(response.message, /not clearly confirmed/);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
+  await r.session.end('client');
+});
+
+test('an unknown booking reference cannot be booked', async () => {
   const r = rig({ cal: [booking] });
   await ready(r);
-  r.gemini.receive(bookCall());
+  r.gemini.receive(createCall('bk99'));
+  await until(() => toolResponses(r).length === 1, 'create response');
+  assert.match(toolResponses(r)[0].response.message, /no prepared booking/);
+  assert.deepEqual(r.calRequests, []);
+  await r.session.end('client');
+});
+
+test('a confirmed booking prompts the browser, books with the phone number, logs it, and answers the model', async () => {
+  const r = rig({ cal: [slots, booking] });
+  await ready(r);
+  const ref = await prepared(r);
+  say(r, 'Yes, that is all correct.');
+  r.gemini.receive(createCall(ref));
   await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'approval prompt');
   const prompt = r.client.json.find((message) => message.type === 'approval_request');
   assert.equal(prompt.approvalId, 'approval-1');
   assert.equal(prompt.operation, 'create_booking');
-  assert.equal(r.calRequests.length, 0, 'nothing is booked before approval');
+  assert.equal(prompt.summary.patientEmail, 'ada@example.com');
+  assert.equal(prompt.summary.patientPhone, '+14155550123');
+  assert.deepEqual(r.calRequests, ['GET /v2/slots'], 'nothing is booked before approval');
 
   r.client.emit('message', { data: JSON.stringify({ type: 'approval_response', approvalId: 'approval-1', approved: true }) });
-  await until(() => r.gemini.json.some((message) => message.toolResponse), 'tool response');
-  const response = r.gemini.json.find((message) => message.toolResponse).toolResponse.functionResponses[0];
-  assert.equal(response.id, 'call-a');
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'tool response');
+  const response = toolResponses(r).find((item) => item.id === 'call-a');
   assert.equal(response.name, 'create_dental_booking');
   assert.equal(response.response.ok, true);
-  assert.deepEqual(r.calRequests, ['POST /v2/bookings']);
-  assert.ok(r.calls.some(([name]) => name === 'recordAppointment'));
+  assert.deepEqual(r.calRequests, ['GET /v2/slots', 'POST /v2/bookings']);
+  const recorded = r.calls.find(([name]) => name === 'recordAppointment')![1];
+  assert.equal(recorded.attendeeEmail, 'ada@example.com');
+  assert.equal(recorded.attendeePhone, '+14155550123');
   assert.ok(r.client.json.some((message) => message.type === 'approval_closed' && message.approvalId === 'approval-1'));
+
+  // The same booking cannot be made twice.
+  r.gemini.receive(createCall(ref, 'call-b'));
+  await until(() => toolResponses(r).some((item) => item.id === 'call-b'), 'second response');
+  assert.match(toolResponses(r).find((item) => item.id === 'call-b').response.message, /no prepared booking/);
   await r.session.end('client');
+  const final = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1];
+  assert.match(final.metadata.outcome, /Booked Ada Lovelace/);
+  assert.equal(final.caller_name, 'Ada Lovelace');
 });
 
 test('a refused booking tells the model it was not approved and books nothing', async () => {
-  const r = rig({ cal: [booking] });
+  const r = rig({ cal: [slots, booking] });
   await ready(r);
-  r.gemini.receive(bookCall());
+  const ref = await prepared(r);
+  say(r, 'Yes.');
+  r.gemini.receive(createCall(ref));
   await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'approval prompt');
   r.client.emit('message', { data: JSON.stringify({ type: 'approval_response', approvalId: 'approval-1', approved: false }) });
-  await until(() => r.gemini.json.some((message) => message.toolResponse), 'tool response');
-  assert.equal(r.gemini.json.find((message) => message.toolResponse).toolResponse.functionResponses[0].response.ok, false);
-  assert.deepEqual(r.calRequests, []);
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'tool response');
+  assert.equal(toolResponses(r).find((item) => item.id === 'call-a').response.ok, false);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
   await r.session.end('client');
 });
 
 test('an approval nobody answers fails closed', async () => {
-  const r = rig({ cal: [booking], approvalTimeoutMs: 30 });
+  const r = rig({ cal: [slots, booking], approvalTimeoutMs: 30 });
   await ready(r);
-  r.gemini.receive(bookCall());
-  await until(() => r.gemini.json.some((message) => message.toolResponse), 'tool response after timeout');
-  assert.match(r.gemini.json.find((message) => message.toolResponse).toolResponse.functionResponses[0].response.message, /not approved/);
-  assert.deepEqual(r.calRequests, []);
+  const ref = await prepared(r);
+  say(r, 'Yes.');
+  r.gemini.receive(createCall(ref));
+  await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'tool response after timeout');
+  assert.match(toolResponses(r).find((item) => item.id === 'call-a').response.message, /not approved/);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
   await r.session.end('client');
 });
 
 test('a cancelled tool call closes its prompt and gets no answer', async () => {
-  const r = rig({ cal: [booking] });
+  const r = rig({ cal: [slots, booking] });
   await ready(r);
-  r.gemini.receive(bookCall());
+  const ref = await prepared(r);
+  say(r, 'Yes.');
+  r.gemini.receive(createCall(ref));
   await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'approval prompt');
   r.gemini.receive({ toolCallCancellation: { ids: ['call-a'] } });
   await until(() => r.client.json.some((message) => message.type === 'approval_closed'), 'prompt closed');
   await wait(30);
-  assert.equal(r.gemini.json.some((message) => message.toolResponse), false);
-  assert.deepEqual(r.calRequests, []);
+  assert.equal(toolResponses(r).some((response) => response.id === 'call-a'), false);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
   await r.session.end('client');
 });
 
 test('an approval answered after the prompt closed is ignored', async () => {
-  const r = rig({ cal: [booking], approvalTimeoutMs: 20 });
+  const r = rig({ cal: [slots, booking], approvalTimeoutMs: 20 });
   await ready(r);
-  r.gemini.receive(bookCall());
+  const ref = await prepared(r);
+  say(r, 'Yes.');
+  r.gemini.receive(createCall(ref));
   await until(() => r.client.json.some((message) => message.type === 'approval_closed'), 'timeout');
   r.client.emit('message', { data: JSON.stringify({ type: 'approval_response', approvalId: 'approval-1', approved: true }) });
   await wait(30);
-  assert.deepEqual(r.calRequests, []);
+  assert.deepEqual(r.calRequests, ['GET /v2/slots']);
   await r.session.end('client');
+});
+
+test('leaving a message for staff is saved to the call and not presented as a booking', async () => {
+  const r = rig();
+  await ready(r);
+  r.gemini.receive(toolCall('msg-1', 'leave_message_for_staff', { caller_name: 'Ada', message: 'Wants a cleaning on Friday', caller_phone: '+14155550123' }));
+  await until(() => toolResponses(r).length === 1, 'message response');
+  assert.equal(toolResponses(r)[0].response.ok, true);
+  assert.match(toolResponses(r)[0].response.message, /Nobody has been called/);
+  await r.session.end('client');
+  const final = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1];
+  assert.match(final.metadata.events[0].text, /Message for staff from Ada: Wants a cleaning on Friday/);
+  assert.equal(final.caller_name, 'Ada');
+});
+
+test('the browser is told whether booking works and that the call is being recorded', async () => {
+  const ok = rig();
+  await ready(ok);
+  await until(() => ok.client.json.some((message) => message.type === 'call_info'), 'call info');
+  assert.deepEqual(ok.client.json.find((message) => message.type === 'call_info'), { type: 'call_info', scheduling: { available: true }, history: { state: 'saved' } });
+  await ok.session.end('client');
+
+  const down = rig({ scheduling: { available: false, reason: 'Cal.com rejected the configured credentials or access' }, createProblem: 'Supabase rejected that secret key.' });
+  await ready(down);
+  await until(() => down.client.json.some((message) => message.type === 'call_info'), 'call info');
+  const info = down.client.json.find((message) => message.type === 'call_info');
+  assert.deepEqual(info.scheduling, { available: false, reason: 'Cal.com rejected the configured credentials or access' });
+  assert.deepEqual(info.history, { state: 'not_saved', problem: 'Supabase rejected that secret key.' });
+  await down.session.end('client');
+  // The setup message tells the model the truth about booking.
+  const setup = down.gemini.json.find((message) => message.setup).setup;
+  assert.match(setup.systemInstruction.parts[0].text, /NOT AVAILABLE \(Cal\.com rejected/);
+});
+
+test('the conversation is saved with the call, and a call whose row could not be created is created again at the end', async () => {
+  const r = rig({ createProblem: 'Supabase rejected that secret key.' });
+  await ready(r);
+  r.gemini.receive({ serverContent: { inputTranscription: { text: 'I need a cleaning' } } });
+  r.gemini.receive({ serverContent: { outputTranscription: { text: 'Sure, when?' }, turnComplete: true } });
+  await r.session.end('client');
+  const creates = r.calls.filter(([name]) => name === 'createCall').map(([, fields]) => fields);
+  assert.equal(creates.length, 2, 'once at the start and once at the end');
+  const again = creates[1];
+  assert.equal(again.status, 'completed');
+  assert.deepEqual(again.metadata.transcript.map((turn: { role: string; text: string }) => `${turn.role}: ${turn.text}`), ['user: I need a cleaning', 'assistant: Sure, when?']);
+  assert.equal(again.metadata.outcome, 'Conversation only; nothing was booked.');
+  const infos = r.client.json.filter((message) => message.type === 'call_info');
+  assert.equal(infos.at(-1).history.state, 'not_saved', 'the retry failed too, and the browser is told why');
+  assert.equal(infos.at(-1).history.problem, 'Supabase rejected that secret key.');
+});
+
+test('a call that could not be written at the end is reported as not saved', async () => {
+  const r = rig({ updateFails: true });
+  await ready(r);
+  await r.session.end('client');
+  assert.equal(r.client.json.filter((message) => message.type === 'call_info').at(-1).history.state, 'not_saved');
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'client' });
 });
 
 test('escalation notifies the browser, marks the call, and keeps that status when the call ends', async () => {
@@ -453,19 +635,21 @@ test('a replacement that never accepts its setup is dropped and the call fails c
 
 test('an answer to a tool call from a replaced connection is dropped, and its prompt is closed', async () => {
   const second = new FakeSocket();
-  const r = rig({ cal: [booking], more: [second] });
+  const r = rig({ cal: [slots, booking], more: [second] });
   await ready(r);
   resumable(r);
-  r.gemini.receive(bookCall());
+  const ref = await prepared(r);
+  say(r, 'Yes.');
+  r.gemini.receive(createCall(ref));
   await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'approval prompt');
   r.gemini.receive({ goAway: { timeLeft: '10s' } });
   await until(() => second.json.length > 0, 'resume setup');
   second.receive({ setupComplete: {} });
   await until(() => r.client.json.some((message) => message.type === 'approval_closed'), 'prompt closed');
   await wait(40);
-  assert.equal(r.gemini.json.some((message) => message.toolResponse), false);
+  assert.equal(toolResponses(r).some((response) => response.id === 'call-a'), false);
   assert.equal(second.json.some((message) => message.toolResponse), false);
-  assert.deepEqual(r.calRequests, [], 'nothing was booked');
+  assert.deepEqual(r.calRequests, ['GET /v2/slots'], 'nothing was booked');
   await r.session.end('client');
 });
 

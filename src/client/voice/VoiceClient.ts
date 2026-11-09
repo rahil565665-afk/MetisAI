@@ -2,6 +2,8 @@ import {
   parseAgentMessage,
   type ApprovalOperation,
   type ClientMessage,
+  type CallHistory,
+  type CallScheduling,
   type EndReason,
 } from '../../shared/voiceProtocol.js';
 import type { VoiceStatus } from '../types.js';
@@ -12,6 +14,8 @@ import { Player } from './player.js';
 const VOICE_SUBPROTOCOL = 'dentdesk-voice-v1';
 /** Stop sending microphone audio if the connection falls this far behind. */
 const MAX_BUFFERED_BYTES = 512 * 1024;
+/** After the person hangs up, keep the connection open this long for the agent to save the call and say so. */
+const END_WAIT_MS = 8_000;
 
 export interface ApprovalRequest {
   approvalId: string;
@@ -27,6 +31,7 @@ export interface VoiceClientEvents {
   approvalClosed(approvalId: string): void;
   escalation(reason: string): void;
   notice(message: string): void;
+  callInfo(scheduling: CallScheduling, history: CallHistory): void;
   error(message: string): void;
   ended(reason: EndReason): void;
 }
@@ -50,11 +55,12 @@ export class VoiceClient {
   private closing = false;
   private failed = false;
   private approvals = new Set<string>();
+  private endTimer: number | undefined;
 
   constructor(private readonly events: VoiceClientEvents) {}
 
   get running(): boolean {
-    return this.context !== null;
+    return this.context !== null && !this.closing;
   }
 
   /** Call from a click handler: the audio engine must be created during a user gesture. */
@@ -99,6 +105,17 @@ export class VoiceClient {
     if (!this.context && !this.socket) return;
     this.closing = true;
     this.sendControl({ type: 'end' });
+    const socket = this.socket;
+    if (this.ready && socket && socket.readyState === WebSocket.OPEN) {
+      // Stop listening and speaking now, but leave the connection open so the agent can save the call
+      // and report whether it was saved. It says 'ended' when it is done; this timer is only a backstop.
+      this.microphone?.stop();
+      this.microphone = null;
+      this.player?.flush();
+      this.setStatus(this.failed ? 'error' : 'disconnected');
+      this.endTimer = window.setTimeout(() => this.teardown(), END_WAIT_MS);
+      return;
+    }
     this.teardown();
     this.setStatus(this.failed ? 'error' : 'disconnected');
   }
@@ -169,6 +186,9 @@ export class VoiceClient {
       case 'notice':
         this.events.notice(message.message);
         return;
+      case 'call_info':
+        this.events.callInfo(message.scheduling, message.history);
+        return;
       case 'error':
         this.failed = true;
         this.events.error(message.message);
@@ -201,6 +221,8 @@ export class VoiceClient {
   }
 
   private teardown(): void {
+    window.clearTimeout(this.endTimer);
+    this.endTimer = undefined;
     window.clearInterval(this.speakingPoll);
     this.speakingPoll = undefined;
     this.microphone?.stop();

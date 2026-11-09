@@ -64,3 +64,40 @@ test('secrets and clinics do not collide in the same store', async () => {
   await registry.putSecretRecord('x', { ciphertext: 'c', nonce: 'n', key_version: 1 });
   assert.deepEqual(await registry.listCompanies(), []);
 });
+
+test('a backup can be exported and restored into an empty registry, keeping ids, settings and encrypted keys', async () => {
+  const source = new RegistryCore(memoryStore());
+  const north = await source.createCompany({ ...input('north'), id: '11111111-1111-4111-8111-111111111111' });
+  assert.ok(north.ok);
+  await source.updateCompany(north.company.id, { agent_status: 'live', integration_status: { gemini: { configured: true } } });
+  await source.putSecretRecord(north.company.id, { ciphertext: 'sealed', nonce: 'nonce', key_version: 1 });
+  const backup = await source.exportAll();
+  assert.equal(backup.companies.length, 1);
+  assert.equal(backup.secrets.length, 1);
+
+  const target = new RegistryCore(memoryStore());
+  assert.deepEqual(await target.importAll(backup), { restored: 1, skipped: 0, renamed: 0 });
+  const restored = await target.getCompany(north.company.id);
+  assert.equal(restored?.agent_status, 'live');
+  assert.equal(restored?.receptionist_config.greeting, 'Hello');
+  assert.equal((await target.getSecretRecord(north.company.id))?.ciphertext, 'sealed');
+});
+
+test('restoring never overwrites a clinic that exists and renames a clashing service name', async () => {
+  const registry = new RegistryCore(memoryStore());
+  const existing = await registry.createCompany({ ...input('north'), id: '11111111-1111-4111-8111-111111111111' });
+  assert.ok(existing.ok);
+  await registry.updateCompany(existing.company.id, { name: 'Edited since the backup' });
+  const stamp = '2026-01-01T00:00:00.000Z';
+  const make = (id: string, slug: string) => ({
+    id, slug, name: `Backed up ${slug}`, business_type: 'dental_clinic', is_active: true, timezone: 'UTC',
+    receptionist_config: {}, agent_status: 'not_created' as const, integration_status: {}, created_at: stamp, updated_at: stamp,
+  });
+  const result = await registry.importAll({
+    companies: [make('11111111-1111-4111-8111-111111111111', 'north'), make('22222222-2222-4222-8222-222222222222', 'north')],
+    secrets: [],
+  });
+  assert.deepEqual(result, { restored: 1, skipped: 1, renamed: 1 });
+  assert.equal((await registry.getCompany(existing.company.id))?.name, 'Edited since the backup');
+  assert.equal((await registry.getCompany('22222222-2222-4222-8222-222222222222'))?.slug, 'north-2');
+});

@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { HttpError } from '../http.js';
-import { readTenantProviderSecrets, type TenantProviderSecrets } from './tenantProviderSecrets.js';
+import { readTenantProviderSecretsSafe, type TenantProviderSecrets } from './tenantProviderSecrets.js';
 
 /**
  * Every clinic brings its own Supabase project. The console never holds a database of its own for
@@ -64,8 +64,9 @@ export function databaseFromSecrets(secrets: Pick<TenantProviderSecrets, 'supaba
   }
 }
 
+/** The clinic's database, or null when none is connected or its saved keys can no longer be read. */
 export async function clinicDatabase(tenantId: string): Promise<SupabaseClient | null> {
-  return databaseFromSecrets(await readTenantProviderSecrets(tenantId));
+  return databaseFromSecrets((await readTenantProviderSecretsSafe(tenantId)).secrets);
 }
 
 interface DatabaseErrorLike { message?: string; code?: string; details?: string }
@@ -129,21 +130,33 @@ export async function checkClinicDatabase(db: SupabaseClient, tenantId: string):
   if (appointments.error) throw new HttpError(400, describeDatabaseError(appointments.error, appointments.status));
 }
 
-function unwrap<T>(result: { data: T | null; error: { message: string } | null }): T {
-  if (result.error) throw new Error('Database operation failed.');
-  if (result.data === null) throw new Error('Database returned no data.');
-  return result.data;
+/** A database failure whose message is advice for the administrator and is safe to show as it is. */
+export class DatabaseAdviceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DatabaseAdviceError';
+  }
 }
 
-export async function createCallLog(db: SupabaseClient, tenantId: string, transport: 'browser' | 'twilio'): Promise<string> {
-  const row = unwrap(await withLegacyLink(db, tenantId, () => db.from('call_logs').insert({ tenant_id: tenantId, transport }).select('id').single())) as { id: string };
-  return row.id;
+/** Fields a call's log row may carry. Anything else is ignored. */
+const CALL_FIELDS = ['status', 'caller_name', 'caller_phone', 'started_at', 'ended_at', 'transfer_requested', 'transfer_reason', 'metadata'] as const;
+
+function callFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const clean: Record<string, unknown> = {};
+  for (const key of CALL_FIELDS) if (fields[key] !== undefined) clean[key] = fields[key];
+  return clean;
+}
+
+export async function createCallLog(db: SupabaseClient, tenantId: string, transport: 'browser' | 'twilio', fields: Record<string, unknown> = {}): Promise<string> {
+  const result = await withLegacyLink(db, tenantId, () => db.from('call_logs').insert({ tenant_id: tenantId, transport, ...callFields(fields) }).select('id').single());
+  if (result.error || !result.data) throw new DatabaseAdviceError(describeDatabaseError(result.error, result.status));
+  return (result.data as { id: string }).id;
 }
 
 export async function updateAgentCallLog(db: SupabaseClient, tenantId: string, callId: string, fields: Record<string, unknown>): Promise<void> {
-  const result = await db.from('call_logs').update(fields).eq('tenant_id', tenantId).eq('id', callId).select('id').maybeSingle();
-  if (result.error) throw new Error('Could not update call log.');
-  if (!result.data) throw new Error('Call log was not found for this clinic.');
+  const result = await db.from('call_logs').update(callFields(fields)).eq('tenant_id', tenantId).eq('id', callId).select('id').maybeSingle();
+  if (result.error) throw new DatabaseAdviceError(describeDatabaseError(result.error, result.status));
+  if (!result.data) throw new DatabaseAdviceError('The call’s history row could not be found, so it was not updated.');
 }
 
 export async function recordAppointment(db: SupabaseClient, input: { tenantId: string; bookingUid: string; status: string; start: string; end?: string; type: string; name: string; email?: string; phone?: string; callId?: string }): Promise<void> {
@@ -175,9 +188,37 @@ export async function recordReschedule(db: SupabaseClient, tenantId: string, old
   }
 }
 
-export async function listRecentCalls(db: SupabaseClient, tenantId: string, limit = 20): Promise<unknown[]> {
-  return unwrap(await db.from('call_logs').select('id,status,transport,started_at,ended_at,caller_name,transfer_requested,transfer_reason')
-    .eq('tenant_id', tenantId).order('started_at', { ascending: false }).limit(limit)) as unknown[];
+/** One call as the dashboard lists it. The transcript is left out; open the call to read it. */
+export interface CallSummary {
+  id: string;
+  status: string;
+  transport: string;
+  started_at: string;
+  ended_at: string | null;
+  caller_name: string | null;
+  transfer_requested: boolean;
+  transfer_reason: string | null;
+  outcome: string | null;
+  note_count: number;
+}
+
+export async function listRecentCalls(db: SupabaseClient, tenantId: string, limit = 20): Promise<CallSummary[]> {
+  const result = await db.from('call_logs')
+    .select('id,status,transport,started_at,ended_at,caller_name,transfer_requested,transfer_reason,outcome:metadata->>outcome,notes:metadata->events')
+    .eq('tenant_id', tenantId).order('started_at', { ascending: false }).limit(limit);
+  if (result.error) throw new DatabaseAdviceError(describeDatabaseError(result.error, result.status));
+  return ((result.data ?? []) as unknown as Array<Record<string, unknown> & { notes?: unknown }>).map((row) => {
+    const { notes, ...rest } = row;
+    return { ...rest, outcome: typeof row.outcome === 'string' ? row.outcome : null, note_count: Array.isArray(notes) ? notes.length : 0 } as unknown as CallSummary;
+  });
+}
+
+/** Everything saved about one call, including what was said. Null when this clinic has no such call. */
+export async function getCallDetail(db: SupabaseClient, tenantId: string, callId: string): Promise<Record<string, unknown> | null> {
+  const result = await db.from('call_logs').select('id,status,transport,started_at,ended_at,caller_name,caller_phone,transfer_requested,transfer_reason,metadata')
+    .eq('tenant_id', tenantId).eq('id', callId).maybeSingle();
+  if (result.error) throw new DatabaseAdviceError(describeDatabaseError(result.error, result.status));
+  return (result.data as Record<string, unknown> | null) ?? null;
 }
 
 export interface UsageSummary { calls: number; appointments: number; escalationCount: number; talkSeconds: number; periodStart: string }

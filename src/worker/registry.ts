@@ -1,11 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   RegistryCore,
+  type BackupData,
   type CompanyChanges,
   type CreateResult,
   type KeyValueStore,
   type NewCompany,
   type RegistryApi,
+  type RestoreResult,
   type SecretRecord,
 } from '../server/registry/core.js';
 import type { Company } from '../server/types.js';
@@ -43,4 +45,6 @@ export class Registry extends DurableObject implements RegistryApi {
   getSecretRecord(id: string): Promise<SecretRecord | null> { return this.core.getSecretRecord(id); }
   putSecretRecord(id: string, record: Pick<SecretRecord, 'ciphertext' | 'nonce' | 'key_version'>): Promise<void> { return this.core.putSecretRecord(id, record); }
   deleteSecretRecord(id: string): Promise<void> { return this.core.deleteSecretRecord(id); }
+  exportAll(): Promise<BackupData> { return this.core.exportAll(); }
+  importAll(data: BackupData): Promise<RestoreResult> { return this.core.importAll(data); }
 }

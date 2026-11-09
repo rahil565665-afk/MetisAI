@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AudioLines, Check, CircleStop, Headphones, Mic, MicOff, Phone, ShieldAlert, X } from 'lucide-react';
 import type { Company, VoiceStatus } from './types.js';
-import type { EndReason } from '../shared/voiceProtocol.js';
+import type { CallHistory, CallScheduling, EndReason } from '../shared/voiceProtocol.js';
 import { VoiceClient, type ApprovalRequest } from './voice/VoiceClient.js';
 
 interface TranscriptRow { role: 'assistant' | 'user' | 'system'; text: string; final: boolean; }
@@ -44,6 +44,7 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [elapsed, setElapsed] = useState(0);
+  const [info, setInfo] = useState<{ scheduling: CallScheduling; history: CallHistory } | null>(null);
   const clientRef = useRef<VoiceClient | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
 
@@ -77,7 +78,7 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
 
   function start() {
     if (clientRef.current?.running) return;
-    setError(''); setNotice(''); setTranscript([]); setElapsed(0); setPending(null);
+    setError(''); setNotice(''); setTranscript([]); setElapsed(0); setPending(null); setInfo(null);
     const client = new VoiceClient({
       status: setStatus,
       transcript: (role, text, final) => setTranscript((rows) => {
@@ -91,6 +92,7 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
         ? `A clinic team member has been requested: ${reason}. This browser test cannot transfer the call to a phone line.`
         : 'A clinic team member has been requested. This browser test cannot transfer the call to a phone line.'),
       notice: setNotice,
+      callInfo: (scheduling, history) => setInfo({ scheduling, history }),
       error: setError,
       ended: (reason) => {
         setPending(null);
@@ -129,6 +131,10 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
       <div className={`voice-circle ${status}`}><div className="voice-circle-inner"><div className="voice-ring ring-one" /><div className="voice-ring ring-two" />{status === 'error' ? <ShieldAlert size={27} /> : status === 'disconnected' ? <MicOff size={25} /> : <AudioLines size={28} />}</div></div>
       <div className="voice-timer">{minutes}:{seconds}</div>
       <p className="voice-caption">{status === 'idle' ? 'Your microphone is off until you begin a test call.' : status === 'listening' ? 'Say hello. The assistant will answer using this clinic’s configuration.' : status === 'speaking' ? 'Listen to the response, or speak to interrupt.' : status === 'transfer_requested' ? 'A handoff event has been recorded for clinic staff. No phone transfer occurred.' : status === 'disconnected' ? 'The test session has ended.' : statusLabel[status] + '…'}</p>
+      {info && <ul className="call-checks" aria-label="Call checks">
+        <li className={info.scheduling.available ? 'ok' : 'bad'}>{info.scheduling.available ? 'Booking: ready' : `Booking unavailable${info.scheduling.reason ? `: ${info.scheduling.reason}` : ''}. Fix it under Integrations → Cal.com scheduling; until then the receptionist will only take a message.`}</li>
+        <li className={info.history.state === 'not_saved' ? 'bad' : 'ok'}>{info.history.state === 'saved' ? (live ? 'Call history: this call is being recorded in Call activity' : 'Call history: saved to Call activity') : info.history.state === 'pending' ? 'Call history: checking…' : `Call history: not saved${info.history.problem ? `. ${info.history.problem}` : ''}`}</li>
+      </ul>}
       {visibleError && <div className="alert error voice-error">{visibleError}</div>}{notice && !visibleError && <div className="alert voice-error">{notice}</div>}
       <div className="voice-controls">{live ? <button className="button danger" onClick={stop}><CircleStop size={17} /> End test call</button> : <button className="button primary" onClick={start}><Phone size={16} /> Start browser test</button>}</div>
       <div className="audio-privacy"><ShieldAlert size={14} /> Audio streams live for this test; it is not recorded or saved as an audio file.</div>

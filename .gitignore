@@ -15,3 +15,7 @@ __pycache__/
 !.env.example
 *.log
 .DS_Store
+
+# End-to-end run output and the generated local Worker config
+e2e/.work/
+.smoke.wrangler.json

@@ -1,0 +1,10 @@
+{
+  "name": "metisai-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end suites for the MetisAI console. Not part of the root package or of CI.",
+  "dependencies": {
+    "playwright": "1.63.0",
+    "ws": "^8.22.1"
+  }
+}

@@ -82,6 +82,10 @@ pnpm dev                    # API on :3001, web on :3000
 | `pnpm types` | Regenerate `worker-configuration.d.ts` after changing `wrangler.jsonc`. |
 | `pnpm deploy` | Build and deploy from your machine (needs `wrangler login`). |
 
+### End-to-end tests
+
+`pnpm check` runs the typecheck and unit tests. `pnpm e2e` (see `e2e/README.md`) additionally runs the real Worker and the dashboard in Chrome against local fakes of Gemini, Cal.com and Supabase: creating clinics, a full booking call with the spoken-email read-back, call history, restarts, and backup/restore. It is not part of CI.
+
 ## Security model
 
 - Passcode sign-in is rate-limited per client IP in a Durable Object (8 failures per 15 minutes), compared in constant time, and issues an 8-hour signed `HttpOnly`, `SameSite=Lax`, `Secure` session cookie. There is no hard-coded fallback secret; production fails closed if one is missing.

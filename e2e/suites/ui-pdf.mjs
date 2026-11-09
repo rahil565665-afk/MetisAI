@@ -1,0 +1,166 @@
+// Browser checks for the PDF knowledge base and clinic creation warnings.
+// Run through `node e2e/run.mjs ui-pdf`.
+import path from 'node:path';
+import { chromium } from '../lib/deps.mjs';
+import { E2E, SHOTS } from '../lib/stack.mjs';
+const BASE = 'http://127.0.0.1:8799';
+const OUT = process.argv[2] || SHOTS;
+const PDF = (name) => path.join(E2E, 'pdfs', name);
+let failed = 0;
+const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  -> ' + extra : ''}`); if (!ok) failed += 1; };
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const logs = [];
+  page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') logs.push(`[${m.type()}] ${m.text()}`); });
+  page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
+  page.on('requestfailed', (r) => logs.push(`[requestfailed] ${r.url()}`));
+  const workerResponses = [];
+  page.on('response', (r) => { if (/pdf\.worker/.test(r.url())) workerResponses.push(`${r.status()} ${r.headers()['content-type']}`); });
+  await page.goto(BASE);
+  await page.locator('input[type=password]').fill('e2e-passcode-123');
+  await page.locator('form button').first().click();
+  await page.getByRole('button', { name: /Add clinic agent/ }).first().waitFor();
+
+  console.log('--- the create dialog has no filters');
+  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  const card = page.locator('.modal-card');
+  await card.waitFor();
+  check('only the clinic name is required', (await card.locator('input[required], textarea[required], select[required]').count()) === 1);
+  check('there is no slug field', (await card.getByLabel(/service name|slug/i).count()) === 0);
+  check('the knowledge base is a PDF upload, not a text field', (await card.getByLabel('Knowledge-base text').count()) === 0 && (await card.locator('input[type=file][accept*="pdf"]').count()) === 1);
+  check('no URL/number input types that make the browser block submitting', (await card.locator('input[type=url], input[type=number], input[pattern]').count()) === 0);
+  const fileInput = card.getByLabel('Knowledge base PDF');
+  const problemText = async () => (await card.locator('.knowledge-upload .alert').first().innerText());
+
+  console.log('--- PDFs that cannot be used say why');
+  for (const [file, pattern, label] of [['locked.pdf', /password/i, 'a password-protected PDF'], ['not-a-pdf.pdf', /not a PDF/i, 'a file that is not a PDF'], ['empty.pdf', /empty/i, 'an empty file'], ['scanned.pdf', /No text could be read.*scan/i, 'a scanned PDF with no text']]) {
+    await fileInput.setInputFiles(PDF(file));
+    await card.locator('.knowledge-upload .alert').first().waitFor({ timeout: 15000 });
+    const text = await problemText();
+    check(`${label} is explained`, pattern.test(text), text);
+    check(`and leaves no knowledge saved (${file})`, (await card.locator('.knowledge-file').count()) === 0);
+  }
+
+  console.log('--- a normal PDF');
+  await fileInput.setInputFiles(PDF('clinic-info.pdf'));
+  await card.locator('.knowledge-file').waitFor({ timeout: 15000 });
+  const fileCard = await card.locator('.knowledge-file').innerText();
+  check('the file card shows the name, pages and size', /clinic-info\.pdf/.test(fileCard) && /2 pages/.test(fileCard) && /characters/.test(fileCard), fileCard.replace(/\s+/g, ' '));
+  check('an earlier problem message is gone', (await card.locator('.knowledge-upload .alert').count()) === 0);
+  await card.locator('.knowledge-preview summary').click();
+  const preview = await card.locator('.knowledge-preview pre').innerText();
+  check('the preview has the PDF text from both pages', /Routine cleaning costs \$90/.test(preview) && /closed on Sundays/.test(preview) && /Opening hours: Monday to Friday/.test(preview), preview.slice(0, 200).replace(/\n/g, ' | '));
+  check('the PDF worker was served as JavaScript', workerResponses.length > 0 && workerResponses.every((w) => /^200 .*javascript/.test(w)), workerResponses.join('; '));
+
+  console.log('--- a very long PDF is cut with a note, not refused');
+  await card.getByRole('button', { name: 'Replace' }).click().catch(() => undefined);
+  await fileInput.setInputFiles(PDF('long.pdf'));
+  await card.locator('.knowledge-upload .alert.warn').waitFor({ timeout: 30000 });
+  const cut = await card.locator('.knowledge-upload .alert.warn').innerText();
+  check('it says how much is used', /60,000/.test(cut), cut);
+  check('and the file card names the long file', /long\.pdf/.test(await card.locator('.knowledge-file').innerText()));
+  await card.getByRole('button', { name: 'Remove knowledge base' }).click();
+  check('removing it brings back the upload button', (await card.locator('.knowledge-drop').count()) === 1);
+  await fileInput.setInputFiles(PDF('clinic-info.pdf'));
+  await card.locator('.knowledge-file').waitFor({ timeout: 15000 });
+
+  console.log('--- creating a clinic with a wrong database key, a wrong Gemini key, and a bad event ID');
+  const name = `PDF Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
+  await page.getByLabel('Clinic name').fill(name);
+  await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9921');
+  await page.getByLabel(/Supabase secret key/).fill('sb_secret_wrong_key_value_000000000');
+  await page.getByLabel(/Gemini API key/).fill('not-a-real-key');
+  await page.getByLabel(/Cal\.com API key/).fill('cal_live_good');
+  await page.getByLabel(/numeric event type ID/).fill('not a number');
+  await page.screenshot({ path: `${OUT}/create-dialog.png` });
+  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await card.waitFor({ state: 'detached', timeout: 20000 });
+  check('the clinic is created anyway and the dialog closes', true);
+  const banner = page.locator('.created-banner');
+  await banner.waitFor();
+  const bannerText = await banner.innerText();
+  check('a banner says it was created and lists each thing to fix', new RegExp(`${name} was created`).test(bannerText) && /rejected that secret key/.test(bannerText) && /Gemini/.test(bannerText) && /event type ID/.test(bannerText), bannerText.replace(/\s+/g, ' '));
+  check('and it opens Integrations to fix them', (await page.locator('.integration-row').count()) === 4);
+  const statusFor = async (label) => (await page.locator('.integration-row', { hasText: label }).locator('.readiness-state').innerText()).trim();
+  check('Supabase and Gemini show Needs attention', await statusFor('Clinic Supabase database') === 'Needs attention' && await statusFor('Gemini Live') === 'Needs attention', `${await statusFor('Clinic Supabase database')} / ${await statusFor('Gemini Live')}`);
+  check('Cal.com shows Needs setup (nothing usable was saved)', await statusFor('Cal.com scheduling') === 'Needs setup', await statusFor('Cal.com scheduling'));
+  await page.locator('.integration-row', { hasText: 'Clinic Supabase database' }).click();
+  check('the saved problem is shown in the form', /rejected that secret key/.test(await page.locator('.integration-form .alert.warn').innerText()));
+  await page.screenshot({ path: `${OUT}/created-with-warnings.png` });
+
+  console.log('--- fix them from Integrations');
+  await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9924');
+  await page.getByLabel('Supabase secret key').fill('sb_secret_e2e_legacy_clinic_key_0000004');
+  await page.locator('.integration-form button.primary').click();
+  await page.waitForFunction(() => /Connected/.test(document.querySelector('.inline-notice')?.textContent ?? ''), null, { timeout: 15000 });
+  check('an old-schema project connects (repaired automatically)', await statusFor('Clinic Supabase database') === 'Configured');
+  await page.locator('.integration-row', { hasText: 'Gemini Live' }).click();
+  await page.getByLabel(/Gemini API key/).fill('e2e-gemini-key');
+  await page.locator('.integration-form button.primary').click();
+  await page.waitForFunction(() => document.querySelector('.integration-row .readiness-state.ok') && [...document.querySelectorAll('.integration-row')].find((r) => /Gemini/.test(r.textContent))?.querySelector('.readiness-state.ok'), null, { timeout: 15000 });
+  check('a corrected Gemini key turns it to Configured', await statusFor('Gemini Live') === 'Configured');
+
+  console.log('--- the PDF knowledge was saved with the clinic');
+  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.knowledge-file').waitFor();
+  check('Clinic setup shows the uploaded PDF', /clinic-info\.pdf/.test(await page.locator('.knowledge-file').innerText()));
+  check('there is no knowledge-base text box on this page either', (await page.locator('textarea').count()) === 2);
+  await page.locator('input[type=file][aria-label="Knowledge base PDF"]').setInputFiles(PDF('long.pdf'));
+  await page.locator('.knowledge-upload .alert.warn').waitFor({ timeout: 30000 });
+  await page.getByRole('button', { name: 'Save reception setup' }).click();
+  await page.waitForFunction(() => document.querySelector('.settings-footer .inline-notice'), null, { timeout: 15000 });
+  const saved = await page.locator('.settings-footer .inline-notice').innerText();
+  check('replacing it and saving works', !/could not|error/i.test(saved), saved);
+  await page.reload();
+  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.knowledge-file').waitFor();
+  check('after a reload the replacement is still there', /long\.pdf/.test(await page.locator('.knowledge-file').innerText()), await page.locator('.knowledge-file').innerText());
+  await page.getByRole('button', { name: 'Remove knowledge base' }).click();
+  await page.getByRole('button', { name: 'Save reception setup' }).click();
+  await page.waitForTimeout(1500);
+  await page.reload();
+  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.knowledge-drop').waitFor();
+  check('removing it and saving leaves no knowledge', true);
+
+  console.log('--- a clinic created from just a name');
+  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  const bare = `Bare Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
+  await page.getByLabel('Clinic name').fill(bare);
+  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await page.locator('.created-banner').waitFor({ timeout: 15000 });
+  const bareBanner = await page.locator('.created-banner').innerText();
+  check('works, and lists the two things still missing', new RegExp(`${bare} was created`).test(bareBanner) && /No database/.test(bareBanner) && /No Gemini/.test(bareBanner), bareBanner.replace(/\s+/g, ' '));
+  await page.locator('.nav-item', { hasText: 'Overview' }).click();
+  await page.getByText('Reception stack').waitFor();
+  const states = await page.locator('.readiness-list').first().locator('.readiness-state').allInnerTexts();
+  check('Overview shows every provider as Needs setup', states.length === 3 && states.every((s) => s.trim() === 'Needs setup'), JSON.stringify(states));
+  await page.screenshot({ path: `${OUT}/overview-bare.png` });
+
+  console.log('--- a clinic on an old-schema project');
+  await page.locator('.created-banner button').click();
+  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  const legacy = `Legacy Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
+  await page.getByLabel('Clinic name').fill(legacy);
+  await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9924');
+  await page.getByLabel(/Supabase secret key/).fill('sb_secret_e2e_legacy_clinic_key_0000004');
+  await page.getByLabel(/Gemini API key/).fill('e2e-gemini-key');
+  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await page.locator('.created-banner', { hasText: legacy }).waitFor({ timeout: 15000 });
+  const legacyBanner = await page.locator('.created-banner').innerText();
+  check('creating it reports no problems at all', new RegExp(`${legacy} was created`).test(legacyBanner) && (await page.locator('.created-banner li').count()) === 0 && !(await page.locator('.created-banner').evaluate((el) => el.classList.contains('warn'))), legacyBanner.replace(/\s+/g, ' '));
+  await page.locator('.created-banner button').click();
+  check('the banner can be dismissed', (await page.locator('.created-banner').count()) === 0);
+  await page.locator('.nav-item', { hasText: 'Overview' }).click();
+  await page.getByText('Reception stack').waitFor();
+  await page.waitForTimeout(800);
+  const legacyStates = await page.locator('.readiness-list').first().locator('.readiness-state').allInnerTexts();
+  check('the database and Gemini show Configured, Cal.com Needs setup', JSON.stringify(legacyStates.map((s) => s.trim())) === JSON.stringify(['Configured', 'Needs setup', 'Configured']), JSON.stringify(legacyStates));
+
+  const interesting = logs.filter((l) => !/Download the React DevTools|fonts\.googleapis|ERR_TUNNEL_CONNECTION_FAILED/.test(l));
+  console.log('console problems:', interesting.join('\n') || '(none)');
+  check('no console errors or failed requests', interesting.length === 0);
+  await browser.close();
+})().catch((e) => { console.error('FAILED', e.stack || e.message); process.exit(1); }).then(() => process.exit(failed ? 1 : 0));

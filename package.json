@@ -18,7 +18,8 @@
     "test": "tsx --test \"src/**/*.test.ts\"",
     "check": "pnpm typecheck && pnpm test",
     "deploy": "pnpm build && wrangler deploy",
-    "start": "NODE_ENV=development tsx src/server/index.ts"
+    "start": "NODE_ENV=development tsx src/server/index.ts",
+    "e2e": "node e2e/run.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",

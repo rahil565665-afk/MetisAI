@@ -77,14 +77,14 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
 
   /** Read-only status for the dashboard. */
   async status(tenantId: string): Promise<ClinicAgentStatus> {
-    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid clinic identifier.');
+    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid business identifier.');
     const inCall = this.session?.active ?? false;
     return { provisioned: true, inCall, status: inCall ? 'in_call' : 'idle' };
   }
 
   /** End an in-progress call, for example because the clinic was deactivated or its credentials changed. */
   async endCall(tenantId: string): Promise<boolean> {
-    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid clinic identifier.');
+    if (!UUID_PATTERN.test(tenantId)) throw new Error('Invalid business identifier.');
     const session = this.session;
     if (!session?.active) return false;
     await session.end('admin');
@@ -96,7 +96,7 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     const match = /^\/agents\/([^/]+)\/ws$/.exec(url.pathname);
     if (!match) return reject(404, 'Not found.');
     const tenantId = match[1]!.toLowerCase();
-    if (!UUID_PATTERN.test(tenantId)) return reject(400, 'Invalid clinic identifier.');
+    if (!UUID_PATTERN.test(tenantId)) return reject(400, 'Invalid business identifier.');
     if (request.method !== 'GET' || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
       return reject(426, 'WebSocket upgrade required.');
     }
@@ -106,13 +106,13 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     try {
       signingSecret = voiceTokenSigningKeyHex(tenantId);
     } catch {
-      return reject(503, 'Clinic voice authentication is unavailable.');
+      return reject(503, 'Business voice authentication is unavailable.');
     }
     const claims = await verifyVoiceToken(subprotocolToken(request) ?? bearerToken(request), tenantId, signingSecret);
-    if (!claims) return reject(401, 'A valid clinic voice token is required.');
+    if (!claims) return reject(401, 'A valid business voice token is required.');
 
     // Checked and claimed with no await in between, so two simultaneous requests cannot both start.
-    if (this.session?.active) return reject(409, 'A voice test is already running for this clinic.');
+    if (this.session?.active) return reject(409, 'A voice test is already running for this business.');
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -147,12 +147,12 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       [company, secrets] = await Promise.all([getCompany(tenantId), readTenantProviderSecrets(tenantId)]);
     } catch (error) {
       if (error instanceof SecretsUnreadableError) throw new SessionStartError(SECRETS_UNREADABLE_PROBLEM);
-      throw new SessionStartError('Clinic agent configuration is unavailable.');
+      throw new SessionStartError('Business voice configuration is unavailable.');
     }
-    if (company.id.toLowerCase() !== tenantId || !company.is_active) throw new SessionStartError('This clinic is unavailable.');
-    if (company.agent_status !== 'live') throw new SessionStartError('This clinic has no provisioned voice agent.');
+    if (company.id.toLowerCase() !== tenantId || !company.is_active) throw new SessionStartError('This business is unavailable.');
+    if (company.agent_status !== 'live') throw new SessionStartError('This business has no provisioned voice agent.');
     const geminiApiKey = secrets.geminiApiKey?.trim();
-    if (!geminiApiKey) throw new SessionStartError('The clinic voice service is not configured. Add a Gemini API key.');
+    if (!geminiApiKey) throw new SessionStartError('The business voice service is not configured. Add a Gemini API key.');
 
     const config = normalizeClinicConfig(company);
     let cal: CalComClient | null = null;
@@ -162,7 +162,10 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
     } catch (error) {
       calError = error instanceof CalComError ? error.message : 'Cal.com scheduling is not configured';
     }
-    const scheduling = await checkScheduling(cal, calError, config.timezone);
+    const checkedScheduling = await checkScheduling(cal, calError, config.timezone);
+    const scheduling = config.enabledActions.booking
+      ? checkedScheduling
+      : { available: false, reason: 'Booking is turned off in Reception setup.' };
     return { config, geminiApiKey, cal, calError, scheduling, store: supabaseCallStore(tenantId, databaseFromSecrets(secrets)) };
   }
 }

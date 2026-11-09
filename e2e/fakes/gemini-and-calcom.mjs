@@ -19,7 +19,7 @@ const cal = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.url.startsWith('/v2/bookings') && req.method === 'POST') {
       const body = JSON.parse(raw);
-      return res.end(JSON.stringify({ status: 'success', data: { uid: 'e2e-booking-1', status: 'accepted', start: body.start, end: new Date(Date.parse(body.start) + 30 * 60_000).toISOString(), eventType: { title: 'Dental checkup' } } }));
+      return res.end(JSON.stringify({ status: 'success', data: { uid: 'e2e-booking-1', status: 'accepted', start: body.start, end: new Date(Date.parse(body.start) + 30 * 60_000).toISOString(), eventType: { title: 'Service booking' } } }));
     }
     if (req.url.startsWith('/v2/slots')) {
       if (req.headers.authorization !== 'Bearer cal_live_good') { res.statusCode = 401; return res.end('{}'); }
@@ -91,15 +91,15 @@ wss.on('connection', (ws, req) => {
       if (audioChunks === 12 && !toolSent) {
         toolSent = true;
         sendJson(ws, { serverContent: { inputTranscription: { text: "I'd like to book " } } });
-        sendJson(ws, { serverContent: { inputTranscription: { text: 'a checkup, please.' } } });
+        sendJson(ws, { serverContent: { inputTranscription: { text: 'a haircut, please.' } } });
         // The first attempt carries an email the way a speech-to-text mistake would write it.
-        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-prep-1', name: 'prepare_dental_booking', args: { patient_name: 'Ada Lovelace', patient_email: 'Ahorita.gmail.com', patient_phone: '+1 415 555 0123', reason: 'Checkup', start: bookingStart.toISOString(), time_zone: 'UTC' } }] } });
+        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-prep-1', name: 'prepare_booking', args: { caller_name: 'Ada Lovelace', caller_email: 'Ahorita.gmail.com', caller_phone: '+1 415 555 0123', request_details: 'Haircut', start: bookingStart.toISOString(), time_zone: 'UTC' } }] } });
       }
       if (awaitingYes && audioChunks >= awaitingYes.at) {
         const ref = awaitingYes.ref;
         awaitingYes = null;
         sendJson(ws, { serverContent: { inputTranscription: { text: 'Yes, that is all correct.' } } });
-        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-create-1', name: 'create_dental_booking', args: { booking_ref: ref } }] } });
+        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-create-1', name: 'create_booking', args: { booking_ref: ref } }] } });
       }
       return;
     }
@@ -110,18 +110,18 @@ wss.on('connection', (ws, req) => {
       state.setups.push({ resumeHandle: handle, resumption: message.setup.sessionResumption !== undefined, compression: message.setup.contextWindowCompression !== undefined });
       sendJson(ws, { setupComplete: {} });
     }
-    else if (message.realtimeInput?.text) speak(ws, 'Thank you for calling Northside Dental. How can I help you today?');
+    else if (message.realtimeInput?.text) speak(ws, 'Thank you for calling. How can I help you today?');
     else if (message.toolResponse) {
       const { name, response } = message.toolResponse.functionResponses[0];
       state.toolResponses.push({ name, response });
-      if (name === 'prepare_dental_booking' && !response.ok && !state.retriedEmail) {
+      if (name === 'prepare_booking' && !response.ok && !state.retriedEmail) {
         state.retriedEmail = true;
-        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-prep-2', name: 'prepare_dental_booking', args: { patient_name: 'Ada Lovelace', patient_email: 'ada at example dot com', patient_phone: '+1 415 555 0123', reason: 'Checkup', start: bookingStart.toISOString(), time_zone: 'UTC' } }] } });
-      } else if (name === 'prepare_dental_booking' && response.ok) {
+        sendJson(ws, { toolCall: { functionCalls: [{ id: 'fc-prep-2', name: 'prepare_booking', args: { caller_name: 'Ada Lovelace', caller_email: 'ada at example dot com', caller_phone: '+1 415 555 0123', request_details: 'Haircut', start: bookingStart.toISOString(), time_zone: 'UTC' } }] } });
+      } else if (name === 'prepare_booking' && response.ok) {
         speak(ws, `Let me read that back. Email ${response.read_back.email_spelled}. Is all of that correct?`);
         awaitingYes = { ref: response.booking_ref, at: audioChunks + 6 };
-      } else if (name === 'create_dental_booking') {
-        speak(ws, response.ok ? 'Your appointment is booked for you.' : 'I could not book that appointment.');
+      } else if (name === 'create_booking') {
+        speak(ws, response.ok ? 'Your booking is confirmed.' : 'I could not complete that booking.');
       } else {
         speak(ws, 'I could not do that.');
       }

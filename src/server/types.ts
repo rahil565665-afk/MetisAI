@@ -1,3 +1,5 @@
+import type { EnabledActions } from '../shared/businessTemplates.js';
+
 export type UserRole = 'platform_admin' | 'owner' | 'manager' | 'viewer';
 
 export interface AppUser {
@@ -22,6 +24,13 @@ export interface IntegrationState {
 export interface ReceptionistConfig {
   greeting?: string;
   faqs?: Array<{ question: string; answer: string }>;
+  persona_name?: string;
+  tone?: string;
+  services?: string[];
+  opening_hours?: string;
+  safety_rules?: string;
+  booking_language?: string;
+  enabled_actions?: Partial<EnabledActions>;
   transfer_enabled?: boolean;
   [key: string]: unknown;
 }

@@ -9,7 +9,7 @@ import { readTenantProviderSecretsSafe, type TenantProviderSecrets } from './ten
  */
 
 const HOSTED_HOST = /^[a-z0-9]{8,40}\.supabase\.co$/;
-const URL_HELP = 'Enter the clinic’s Supabase project URL, like https://abcdefghijklmnop.supabase.co (Supabase → Project Settings → API → Project URL).';
+const URL_HELP = 'Enter the business’s Supabase project URL, like https://abcdefghijklmnop.supabase.co (Supabase → Project Settings → API → Project URL).';
 
 /** Return the origin of a Supabase project URL, or throw a message the administrator can act on. */
 export function normalizeSupabaseUrl(raw: string): string {
@@ -42,7 +42,7 @@ function jwtRole(key: string): string | null {
 export function cleanSupabaseKey(raw: string): string {
   const key = raw.trim();
   if (key.length < 20 || key.length > 2048 || /\s/.test(key)) {
-    throw new HttpError(400, 'Enter the clinic’s Supabase secret key (Project Settings → API → Secret key). It is one long value with no spaces.');
+    throw new HttpError(400, 'Enter the business’s Supabase secret key (Project Settings → API → Secret key). It is one long value with no spaces.');
   }
   if (key.startsWith('sb_publishable_') || jwtRole(key) === 'anon') {
     throw new HttpError(400, 'That is the public Supabase key. Use the secret key instead (it starts with sb_secret_, or is the service_role key).');
@@ -82,7 +82,7 @@ export function describeDatabaseError(error: DatabaseErrorLike | null | undefine
     return 'This project still has a link from an earlier version that blocks saving call history, and it could not be repaired automatically. Run supabase/clinic-schema.sql in its SQL Editor once, then press Save connection again.';
   }
   if (code === '42P01' || code === 'PGRST205' || code === 'PGRST204' || /schema cache|does not exist|could not find the table/i.test(message)) {
-    return 'The clinic’s Supabase project is missing its tables. Run supabase/clinic-schema.sql in its SQL Editor, then retry.';
+    return 'The business’s Supabase project is missing its tables. Run supabase/clinic-schema.sql in its SQL Editor, then retry.';
   }
   if (/fetch failed|network|enotfound|econn|getaddrinfo|timed? ?out/i.test(message) || status === 0) {
     return 'Could not reach that Supabase project. Check the project URL and that the project is not paused.';

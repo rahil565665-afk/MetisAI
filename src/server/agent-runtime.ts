@@ -17,7 +17,7 @@ const unavailableRuntime: ClinicAgentRuntime = {
     return { provisioned: false, inCall: false, status: 'unavailable' };
   },
   async endCall() {
-    throw new Error('The clinic voice agent is unavailable in this environment.');
+    throw new Error('The business voice agent is unavailable in this environment.');
   },
 };
 

@@ -23,8 +23,8 @@ import {
 import {
   BookingMemory,
   GREETING_TRIGGER,
-  TOOL_DECLARATIONS,
   buildSystemInstruction,
+  receptionistTools,
   runTool,
   type CallFields,
   type CallStore,
@@ -106,7 +106,7 @@ export interface SessionDeps {
 
 const NORMAL_CLOSE = 1000;
 const SERVICE_CLOSE = 1011;
-export const GEMINI_REFUSED = 'The Gemini Live service refused the connection. Check the clinic\'s Gemini API key and that it has Live API access.';
+export const GEMINI_REFUSED = 'The Gemini Live service refused the connection. Check the business\'s Gemini API key and that it has Live API access.';
 const IDLE_NOTICE = 'No one has spoken for a while. The test call will end soon unless someone speaks.';
 const LIMIT_NOTICE = 'This test call is about to reach its time limit. Start a new test call to keep going.';
 const ENDING_NOTICE = 'The voice service will end this session shortly.';
@@ -255,7 +255,7 @@ export class VoiceSession {
       model: this.deps.model,
       voiceName: this.deps.voiceName,
       systemInstruction: buildSystemInstruction(prepared.config, this.now(), this.scheduling()),
-      tools: TOOL_DECLARATIONS,
+      tools: receptionistTools(prepared.config, this.scheduling()),
       resumeHandle,
       longSession: this.longSession,
     }));
@@ -597,6 +597,7 @@ export class VoiceSession {
       beginReadback: () => { this.callerWords = ''; },
       note: (text) => this.note(text),
       setCallerName: (name) => { this.callerName = name; },
+      enabledActions: prepared.config.enabledActions,
     };
     const results: ToolResult[] = [];
     for (const call of calls) {
@@ -745,7 +746,7 @@ export class VoiceSession {
       const result = await Promise.race([work, timeout]);
       if (result === true) this.history = { state: 'saved' };
       else if (this.history.state !== 'not_saved' || !this.history.problem) {
-        this.history = { state: 'not_saved', problem: result === 'timeout' ? 'Saving the call took too long, so it may not appear in Call activity.' : 'The call ended, but its history could not be saved. Check the clinic’s Supabase connection under Integrations.' };
+        this.history = { state: 'not_saved', problem: result === 'timeout' ? 'Saving the call took too long, so it may not appear in Call activity.' : 'The call ended, but its history could not be saved. Check the business’s Supabase connection under Integrations.' };
       }
     } finally {
       clearTimeout(timer);

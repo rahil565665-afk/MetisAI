@@ -21,10 +21,10 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.goto(BASE);
   await page.locator('input[type=password]').fill('e2e-passcode-123');
   await page.locator('form button').first().click();
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().waitFor();
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().waitFor();
 
   console.log('--- the create dialog has no filters');
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().click();
   const card = page.locator('.modal-card');
   await card.waitFor();
   check('only the clinic name is required', (await card.locator('input[required], textarea[required], select[required]').count()) === 1);
@@ -68,14 +68,14 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
 
   console.log('--- creating a clinic with a wrong database key, a wrong Gemini key, and a bad event ID');
   const name = `PDF Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
-  await page.getByLabel('Clinic name').fill(name);
+  await page.getByLabel('Business name').fill(name);
   await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9921');
   await page.getByLabel(/Supabase secret key/).fill('sb_secret_wrong_key_value_000000000');
   await page.getByLabel(/Gemini API key/).fill('not-a-real-key');
   await page.getByLabel(/Cal\.com API key/).fill('cal_live_good');
   await page.getByLabel(/numeric event type ID/).fill('not a number');
   await page.screenshot({ path: `${OUT}/create-dialog.png` });
-  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await page.getByRole('button', { name: 'Create business' }).click();
   await card.waitFor({ state: 'detached', timeout: 20000 });
   check('the clinic is created anyway and the dialog closes', true);
   const banner = page.locator('.created-banner');
@@ -84,9 +84,9 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('a banner says it was created and lists each thing to fix', new RegExp(`${name} was created`).test(bannerText) && /rejected that secret key/.test(bannerText) && /Gemini/.test(bannerText) && /event type ID/.test(bannerText), bannerText.replace(/\s+/g, ' '));
   check('and it opens Integrations to fix them', (await page.locator('.integration-row').count()) === 4);
   const statusFor = async (label) => (await page.locator('.integration-row', { hasText: label }).locator('.readiness-state').innerText()).trim();
-  check('Supabase and Gemini show Needs attention', await statusFor('Clinic Supabase database') === 'Needs attention' && await statusFor('Gemini Live') === 'Needs attention', `${await statusFor('Clinic Supabase database')} / ${await statusFor('Gemini Live')}`);
+  check('Supabase and Gemini show Needs attention', await statusFor('Business Supabase database') === 'Needs attention' && await statusFor('Gemini Live') === 'Needs attention', `${await statusFor('Business Supabase database')} / ${await statusFor('Gemini Live')}`);
   check('Cal.com shows Needs setup (nothing usable was saved)', await statusFor('Cal.com scheduling') === 'Needs setup', await statusFor('Cal.com scheduling'));
-  await page.locator('.integration-row', { hasText: 'Clinic Supabase database' }).click();
+  await page.locator('.integration-row', { hasText: 'Business Supabase database' }).click();
   check('the saved problem is shown in the form', /rejected that secret key/.test(await page.locator('.integration-form .alert.warn').innerText()));
   await page.screenshot({ path: `${OUT}/created-with-warnings.png` });
 
@@ -95,7 +95,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.getByLabel('Supabase secret key').fill('sb_secret_e2e_legacy_clinic_key_0000004');
   await page.locator('.integration-form button.primary').click();
   await page.waitForFunction(() => /Connected/.test(document.querySelector('.inline-notice')?.textContent ?? ''), null, { timeout: 15000 });
-  check('an old-schema project connects (repaired automatically)', await statusFor('Clinic Supabase database') === 'Configured');
+  check('an old-schema project connects (repaired automatically)', await statusFor('Business Supabase database') === 'Configured');
   await page.locator('.integration-row', { hasText: 'Gemini Live' }).click();
   await page.getByLabel(/Gemini API key/).fill('e2e-gemini-key');
   await page.locator('.integration-form button.primary').click();
@@ -103,10 +103,10 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('a corrected Gemini key turns it to Configured', await statusFor('Gemini Live') === 'Configured');
 
   console.log('--- the PDF knowledge was saved with the clinic');
-  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.nav-item', { hasText: 'Reception setup' }).click();
   await page.locator('.knowledge-file').waitFor();
-  check('Clinic setup shows the uploaded PDF', /clinic-info\.pdf/.test(await page.locator('.knowledge-file').innerText()));
-  check('there is no knowledge-base text box on this page either', (await page.locator('textarea').count()) === 2);
+  check('Reception setup shows the uploaded PDF', /clinic-info\.pdf/.test(await page.locator('.knowledge-file').innerText()));
+  check('there is no knowledge-base text box on this page either', (await page.locator('.knowledge-upload textarea').count()) === 0 && (await page.getByLabel('Knowledge-base text').count()) === 0);
   await page.locator('input[type=file][aria-label="Knowledge base PDF"]').setInputFiles(PDF('long.pdf'));
   await page.locator('.knowledge-upload .alert.warn').waitFor({ timeout: 30000 });
   await page.getByRole('button', { name: 'Save reception setup' }).click();
@@ -114,22 +114,22 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   const saved = await page.locator('.settings-footer .inline-notice').innerText();
   check('replacing it and saving works', !/could not|error/i.test(saved), saved);
   await page.reload();
-  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.nav-item', { hasText: 'Reception setup' }).click();
   await page.locator('.knowledge-file').waitFor();
   check('after a reload the replacement is still there', /long\.pdf/.test(await page.locator('.knowledge-file').innerText()), await page.locator('.knowledge-file').innerText());
   await page.getByRole('button', { name: 'Remove knowledge base' }).click();
   await page.getByRole('button', { name: 'Save reception setup' }).click();
   await page.waitForTimeout(1500);
   await page.reload();
-  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.nav-item', { hasText: 'Reception setup' }).click();
   await page.locator('.knowledge-drop').waitFor();
   check('removing it and saving leaves no knowledge', true);
 
   console.log('--- a clinic created from just a name');
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().click();
   const bare = `Bare Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
-  await page.getByLabel('Clinic name').fill(bare);
-  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await page.getByLabel('Business name').fill(bare);
+  await page.getByRole('button', { name: 'Create business' }).click();
   await page.locator('.created-banner').waitFor({ timeout: 15000 });
   const bareBanner = await page.locator('.created-banner').innerText();
   check('works, and lists the two things still missing', new RegExp(`${bare} was created`).test(bareBanner) && /No database/.test(bareBanner) && /No Gemini/.test(bareBanner), bareBanner.replace(/\s+/g, ' '));
@@ -141,13 +141,13 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
 
   console.log('--- a clinic on an old-schema project');
   await page.locator('.created-banner button').click();
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().click();
   const legacy = `Legacy Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
-  await page.getByLabel('Clinic name').fill(legacy);
+  await page.getByLabel('Business name').fill(legacy);
   await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9924');
   await page.getByLabel(/Supabase secret key/).fill('sb_secret_e2e_legacy_clinic_key_0000004');
   await page.getByLabel(/Gemini API key/).fill('e2e-gemini-key');
-  await page.getByRole('button', { name: 'Create clinic agent' }).click();
+  await page.getByRole('button', { name: 'Create business' }).click();
   await page.locator('.created-banner', { hasText: legacy }).waitFor({ timeout: 15000 });
   const legacyBanner = await page.locator('.created-banner').innerText();
   check('creating it reports no problems at all', new RegExp(`${legacy} was created`).test(legacyBanner) && (await page.locator('.created-banner li').count()) === 0 && !(await page.locator('.created-banner').evaluate((el) => el.classList.contains('warn'))), legacyBanner.replace(/\s+/g, ' '));

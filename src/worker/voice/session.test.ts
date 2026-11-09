@@ -177,25 +177,25 @@ test('an interruption flushes the transcript and tells the browser to stop playb
 
 const booking = { status: 'success', data: { uid: 'new-uid-99', status: 'accepted', start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z', eventType: { title: 'Checkup' } } };
 const slots = { status: 'success', data: { '2026-11-05': [{ start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z' }, { start: '2026-11-05T10:00:00Z', end: '2026-11-05T10:30:00Z' }] } };
-const prepareArgs = { patient_name: 'Ada Lovelace', patient_email: 'ada at example dot com', patient_phone: '+1 415 555 0123', reason: 'Cleaning', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' };
+const prepareArgs = { caller_name: 'Ada Lovelace', caller_email: 'ada at example dot com', caller_phone: '+1 415 555 0123', request_details: 'Cleaning', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' };
 const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({ toolCall: { functionCalls: [{ id, name, args }] } });
 const toolResponses = (r: Rig) => r.gemini.json.filter((message) => message.toolResponse).map((message) => message.toolResponse.functionResponses[0]);
 const say = (r: Rig, text: string) => r.gemini.receive({ serverContent: { inputTranscription: { text } } });
 
 /** The caller asks for a booking and the receptionist prepares it; returns the reference to read back. */
 async function prepared(r: Rig, args: Record<string, unknown> = prepareArgs): Promise<string> {
-  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', args));
+  r.gemini.receive(toolCall('prep-1', 'prepare_booking', args));
   await until(() => toolResponses(r).some((response) => response.id === 'prep-1'), 'prepare response');
   const response = toolResponses(r).find((item) => item.id === 'prep-1').response;
   assert.equal(response.ok, true, JSON.stringify(response));
   return response.booking_ref as string;
 }
-const createCall = (ref: string, id = 'call-a') => toolCall(id, 'create_dental_booking', { booking_ref: ref });
+const createCall = (ref: string, id = 'call-a') => toolCall(id, 'create_booking', { booking_ref: ref });
 
 test('preparing a booking checks the time is free, and reads back the details to confirm, booking nothing', async () => {
   const r = rig({ cal: [slots] });
   await ready(r);
-  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', prepareArgs));
+  r.gemini.receive(toolCall('prep-1', 'prepare_booking', prepareArgs));
   await until(() => toolResponses(r).length === 1, 'prepare response');
   const { response } = toolResponses(r)[0];
   assert.equal(response.ok, true);
@@ -211,7 +211,7 @@ test('preparing a booking checks the time is free, and reads back the details to
 test('a time Cal.com is not offering is refused, with the nearest free times', async () => {
   const r = rig({ cal: [slots] });
   await ready(r);
-  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', { ...prepareArgs, start: '2026-11-05T09:15:00Z' }));
+  r.gemini.receive(toolCall('prep-1', 'prepare_booking', { ...prepareArgs, start: '2026-11-05T09:15:00Z' }));
   await until(() => toolResponses(r).length === 1, 'prepare response');
   const { response } = toolResponses(r)[0];
   assert.equal(response.ok, false);
@@ -223,7 +223,7 @@ test('a time Cal.com is not offering is refused, with the nearest free times', a
 test('an email that is not an address is refused before anything is read back', async () => {
   const r = rig({ cal: [slots] });
   await ready(r);
-  r.gemini.receive(toolCall('prep-1', 'prepare_dental_booking', { ...prepareArgs, patient_email: 'Ahorita.gmail.com' }));
+  r.gemini.receive(toolCall('prep-1', 'prepare_booking', { ...prepareArgs, caller_email: 'Ahorita.gmail.com' }));
   await until(() => toolResponses(r).length === 1, 'prepare response');
   assert.equal(toolResponses(r)[0].response.ok, false);
   assert.deepEqual(r.calRequests, []);
@@ -289,14 +289,14 @@ test('a confirmed booking prompts the browser, books with the phone number, logs
   const prompt = r.client.json.find((message) => message.type === 'approval_request');
   assert.equal(prompt.approvalId, 'approval-1');
   assert.equal(prompt.operation, 'create_booking');
-  assert.equal(prompt.summary.patientEmail, 'ada@example.com');
-  assert.equal(prompt.summary.patientPhone, '+14155550123');
+  assert.equal(prompt.summary.callerEmail, 'ada@example.com');
+  assert.equal(prompt.summary.callerPhone, '+14155550123');
   assert.deepEqual(r.calRequests, ['GET /v2/slots'], 'nothing is booked before approval');
 
   r.client.emit('message', { data: JSON.stringify({ type: 'approval_response', approvalId: 'approval-1', approved: true }) });
   await until(() => toolResponses(r).some((response) => response.id === 'call-a'), 'tool response');
   const response = toolResponses(r).find((item) => item.id === 'call-a');
-  assert.equal(response.name, 'create_dental_booking');
+  assert.equal(response.name, 'create_booking');
   assert.equal(response.response.ok, true);
   assert.deepEqual(r.calRequests, ['GET /v2/slots', 'POST /v2/bookings']);
   const recorded = r.calls.find(([name]) => name === 'recordAppointment')![1];
@@ -375,9 +375,11 @@ test('leaving a message for staff is saved to the call and not presented as a bo
   await until(() => toolResponses(r).length === 1, 'message response');
   assert.equal(toolResponses(r)[0].response.ok, true);
   assert.match(toolResponses(r)[0].response.message, /Nobody has been called/);
+  assert.equal(r.client.json.some((message) => message.type === 'escalation'), false);
   await r.session.end('client');
   const final = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1];
-  assert.match(final.metadata.events[0].text, /Message for staff from Ada: Wants a cleaning on Friday/);
+  assert.match(final.metadata.events[0].text, /Message for the business team from Ada: Wants a cleaning on Friday/);
+  assert.notEqual(final.status, 'transfer_requested');
   assert.equal(final.caller_name, 'Ada');
 });
 
@@ -684,9 +686,9 @@ test('unsupported audio from Gemini ends the call instead of playing noise', asy
 });
 
 test('start-up problems with a safe message reach the browser verbatim; others are generic', async () => {
-  const safe = rig({ prepare: async () => { throw new SessionStartError('This clinic is unavailable.'); } });
+  const safe = rig({ prepare: async () => { throw new SessionStartError('This business is unavailable.'); } });
   await safe.done;
-  assert.deepEqual(safe.client.json, [{ type: 'error', message: 'This clinic is unavailable.' }, { type: 'ended', reason: 'service' }]);
+  assert.deepEqual(safe.client.json, [{ type: 'error', message: 'This business is unavailable.' }, { type: 'ended', reason: 'service' }]);
 
   const unsafe = rig({ prepare: async () => { throw new Error('connection string postgres://user:pass@host'); } });
   await unsafe.done;

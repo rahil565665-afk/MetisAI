@@ -16,12 +16,14 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.goto(BASE);
   await page.locator('input[type=password]').fill('e2e-passcode-123');
   await page.locator('form button').first().click();
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().waitFor();
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().waitFor();
 
-  console.log('--- create-clinic dialog on a short screen');
-  await page.getByRole('button', { name: /Add clinic agent/ }).first().click();
+  console.log('--- create-business dialog on a short screen');
+  await page.getByRole('button', { name: /Add business receptionist/ }).first().click();
   const card = page.locator('.modal-card');
   await card.waitFor();
+  check('General Business is the safe default template', await page.getByLabel('Business template').inputValue() === 'general');
+  await page.getByLabel('Business template').selectOption('salon_spa');
   const m = await card.evaluate((el) => ({ scroll: el.scrollHeight, client: el.clientHeight, top: el.scrollTop }));
   check('the dialog is taller than the screen, so it must scroll', m.scroll > m.client, JSON.stringify(m));
   check('the page behind is locked', await page.evaluate(() => document.body.style.overflow) === 'hidden');
@@ -34,15 +36,16 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('scrolling over the dialog scrolls the dialog', after > 300, `scrollTop ${after}`);
   check('and not the page behind it', JSON.stringify(pageBefore) === JSON.stringify(pageAfter), `${pageBefore} -> ${pageAfter}`);
   await card.evaluate((el) => { el.scrollTop = el.scrollHeight; });
-  const submit = page.getByRole('button', { name: 'Create clinic agent' });
+  const submit = page.getByRole('button', { name: 'Create business' });
   const box = await submit.boundingBox();
   check('the Create button can be scrolled into view', box && box.y >= 0 && box.y + box.height <= 560, JSON.stringify(box));
   await page.screenshot({ path: `${OUT}/modal-bottom.png` });
   await card.evaluate((el) => { el.scrollTop = 0; });
 
-  console.log('--- creating a clinic through the dialog');
-  const clinicName = `UI Dental ${Math.floor(Math.random() * 9000 + 1000)}`;
-  await page.getByLabel('Clinic name').fill(clinicName);
+  console.log('--- creating a business through the dialog');
+  const businessName = `UI Studio ${Math.floor(Math.random() * 9000 + 1000)}`;
+  await page.getByLabel('Business template').selectOption('salon_spa');
+  await page.getByLabel('Business name').fill(businessName);
   await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9921');
   await page.getByLabel(/Supabase secret key/).fill('sb_secret_e2e_clinic_one_key_000000001');
   await page.getByLabel(/Gemini API key/).fill('e2e-gemini-key');
@@ -53,14 +56,15 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('creating with the right key closes the dialog and unlocks the page', await page.evaluate(() => document.body.style.overflow) === '');
   await page.locator('.created-banner').waitFor();
   check('no warnings when everything is right', (await page.locator('.created-banner li').count()) === 0);
-  await page.locator('.nav-item', { hasText: 'Clinic setup' }).click();
+  await page.locator('.nav-item', { hasText: 'Reception setup' }).click();
   await page.getByText('Reception instructions').waitFor();
+  check('the selected Salon/Spa template is persisted', (await page.locator('.settings-main .mini-badge').innerText()).trim() === 'Salon / Spa');
 
   console.log('--- integrations');
   await page.locator('.nav-item', { hasText: 'Integrations' }).click();
-  await page.locator('.integration-row', { hasText: 'Clinic Supabase database' }).waitFor();
+  await page.locator('.integration-row', { hasText: 'Business Supabase database' }).waitFor();
   const rows = await page.locator('.integration-row strong').allInnerTexts();
-  check('the list has Gemini, Cal.com, the clinic database and Twilio', JSON.stringify(rows) === JSON.stringify(['Gemini Live', 'Cal.com scheduling', 'Clinic Supabase database', 'Twilio credentials']), JSON.stringify(rows));
+  check('the list has Gemini, Cal.com, the business database and Twilio', JSON.stringify(rows) === JSON.stringify(['Gemini Live', 'Cal.com scheduling', 'Business Supabase database', 'Twilio credentials']), JSON.stringify(rows));
   await page.locator('.integration-row', { hasText: 'Cal.com scheduling' }).click();
   const labels = await page.locator('.integration-form .form-field > span').allInnerTexts();
   check('Cal.com asks for a key, a link and an ID only', JSON.stringify(labels) === JSON.stringify(['Cal.com API key', 'Event link', 'Or numeric event type ID']), JSON.stringify(labels));
@@ -75,7 +79,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.locator('.integration-form button.primary').click();
   await page.waitForFunction(() => /rejected that API key/.test(document.querySelector('.inline-notice')?.textContent ?? ''), null, { timeout: 8000 });
   check('a wrong key shows its own reason, not the old generic text', !/Check the fields/.test(await page.locator('.inline-notice').innerText()), await page.locator('.inline-notice').innerText());
-  await page.locator('.integration-row', { hasText: 'Clinic Supabase database' }).click();
+  await page.locator('.integration-row', { hasText: 'Business Supabase database' }).click();
   const dbLabels = await page.locator('.integration-form .form-field > span').allInnerTexts();
   check('the database form asks for a URL and a secret key', JSON.stringify(dbLabels) === JSON.stringify(['Supabase project URL', 'Supabase secret key']), JSON.stringify(dbLabels));
   await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9923');
@@ -83,7 +87,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.locator('.integration-form button.primary').click();
   await page.waitForFunction(() => /clinic-schema\.sql/.test(document.querySelector('.inline-notice')?.textContent ?? ''), null, { timeout: 8000 });
   check('a project without tables says to run the SQL file', true);
-  check('and is shown as needing attention rather than blocked', (await page.locator('.integration-row', { hasText: 'Clinic Supabase database' }).locator('.readiness-state').innerText()).trim() === 'Needs attention');
+  check('and is shown as needing attention rather than blocked', (await page.locator('.integration-row', { hasText: 'Business Supabase database' }).locator('.readiness-state').innerText()).trim() === 'Needs attention');
   await page.getByLabel('Supabase project URL').fill('http://127.0.0.1:9921');
   await page.getByLabel('Supabase secret key').fill('sb_secret_e2e_clinic_one_key_000000001');
   await page.locator('.integration-form button.primary').click();
@@ -96,7 +100,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   const score = (await page.locator('.readiness-score strong').innerText()).replace(/\s+/g, '');
   check('the stack counts two providers as working (Cal.com has the wrong key saved above)', score === '2/3', score);
   check('and says what is wrong with Cal.com', /Cal\.com:.*rejected that API key/.test(await page.locator('.alert.warn').first().innerText()), await page.locator('.alert.warn').first().innerText());
-  check('and names the clinic database', (await page.locator('.readiness-list').first().innerText()).includes('Clinic Supabase database'));
+  check('and names the business database', (await page.locator('.readiness-list').first().innerText()).includes('Business Supabase database'));
 
   console.log('--- put the Cal.com key right, so a call can really book');
   await page.locator('.nav-item', { hasText: 'Integrations' }).click();
@@ -111,7 +115,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.locator('.nav-item', { hasText: 'Voice test' }).click();
   await page.getByRole('button', { name: /Start browser test/ }).click();
-  await page.getByText(/Thank you for calling Northside Dental|How can I help you today/).first().waitFor({ timeout: 20000 });
+  await page.getByText(/Thank you for calling|How can I help you today/).first().waitFor({ timeout: 20000 });
   await page.locator('.call-checks').waitFor({ timeout: 10000 });
   const checks = await page.locator('.call-checks').innerText();
   check('the page says booking is ready', /Booking: ready/.test(checks), checks);
@@ -123,7 +127,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   check('the receptionist read the email back letter by letter before the approval', /a, d, a, at, e, x, a, m, p, l, e, dot, c, o, m/.test(spokenReadBack), spokenReadBack.replace(/\s+/g, ' '));
   check('and the caller\'s yes is in the transcript', (await page.locator('.transcript-line.user', { hasText: 'Yes, that is all correct' }).count()) >= 1);
   await page.getByRole('button', { name: /Approve action/ }).click();
-  await page.getByText(/Your appointment is booked/).first().waitFor({ timeout: 15000 });
+  await page.getByText(/Your booking is confirmed/).first().waitFor({ timeout: 15000 });
   check('greeting, approval and booking work as before', true);
   await page.waitForTimeout(1500);
   const trigger = async (mode) => (await fetch(`http://127.0.0.1:9912/__trigger?mode=${mode}`)).text();
@@ -160,7 +164,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.locator('.nav-item', { hasText: 'Overview' }).click();
   await page.locator('.usage-summary').waitFor();
   await page.waitForFunction(() => document.querySelector('.usage-stats')?.children.length === 4, null, { timeout: 10000 });
-  const states = [{ name: 'with-data', id: await page.getByLabel('Choose active clinic').inputValue() }];
+  const states = [{ name: 'with-data', id: await page.getByLabel('Choose active business').inputValue() }];
   const additional = await page.evaluate(async () => {
     const create = async (name, integrations) => {
       const response = await fetch('/api/tenants', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, timezone: 'UTC', integrations }) });
@@ -178,7 +182,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
   await page.locator('.nav-item', { hasText: 'Overview' }).waitFor();
   const widths = [1440, 1280, 1024, 768, 390];
   for (const state of states) {
-    await page.getByLabel('Choose active clinic').selectOption(state.id);
+    await page.getByLabel('Choose active business').selectOption(state.id);
     await page.locator('.usage-summary').waitFor();
     if (state.name === 'with-data') {
       await page.waitForFunction(() => document.querySelector('.usage-stats')?.children.length === 4, null, { timeout: 10000 });

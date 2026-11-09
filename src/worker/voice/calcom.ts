@@ -52,8 +52,8 @@ export class CalComClient {
     const slug = optionalText(config.event_type_slug);
     const username = optionalText(config.username);
     const teamSlug = optionalText(config.team_slug);
-    if (Boolean(eventTypeId) === Boolean(slug)) throw new CalComError('Configure exactly one Cal.com event type ID or slug in the clinic settings');
-    if (slug && Boolean(username) === Boolean(teamSlug)) throw new CalComError('A slug event type requires exactly one clinic username or team slug');
+    if (Boolean(eventTypeId) === Boolean(slug)) throw new CalComError('Configure exactly one Cal.com event type ID or slug in the business settings');
+    if (slug && Boolean(username) === Boolean(teamSlug)) throw new CalComError('A slug event type requires exactly one owner username or team slug');
     const key = apiKey?.trim();
     if (!key) throw new CalComError('Cal.com scheduling is not configured');
     return new CalComClient(key, eventTypeId, slug, username, teamSlug, (options.baseUrl ?? CALCOM_API_ORIGIN).replace(/\/+$/, ''), options.fetcher ?? ((input, init) => fetch(input, init)));
@@ -150,16 +150,16 @@ export class CalComClient {
     return data as Record<string, unknown>;
   }
 
-  /** Basic attendee-email match; not a substitute for a clinic-approved identity-verification policy. */
-  async requireAttendeeIdentity(uid: string, patientEmail: string): Promise<void> {
+  /** Basic attendee-email match; not a substitute for a business-approved identity-verification policy. */
+  async requireAttendeeIdentity(uid: string, attendeeEmail: string): Promise<void> {
     const booking = await this.getBooking(uid);
     const attendees = booking.attendees;
     if (!Array.isArray(attendees) || attendees.length === 0) throw new CalComError('Cal.com did not provide attendee identity; mutation denied');
     const matches = attendees.some((attendee) => {
       const email = attendee && typeof attendee === 'object' ? (attendee as { email?: unknown }).email : undefined;
-      return typeof email === 'string' && email.trim().toLowerCase() === patientEmail;
+      return typeof email === 'string' && email.trim().toLowerCase() === attendeeEmail;
     });
-    if (!matches) throw new CalComError('Patient identity does not match this booking; mutation denied');
+    if (!matches) throw new CalComError('Caller email does not match this booking; change denied');
     if (booking.status !== 'accepted' && booking.status !== 'pending') throw new CalComError('This booking cannot be changed in its current status');
   }
 
@@ -168,7 +168,7 @@ export class CalComClient {
       body: {
         start: utcIso(input.newStart),
         rescheduledBy: input.email,
-        reschedulingReason: 'Patient requested rescheduling through the dental receptionist',
+        reschedulingReason: 'Caller requested a booking change through the receptionist',
       },
     });
     return summarize(data);

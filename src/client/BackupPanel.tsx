@@ -4,8 +4,8 @@ import { api } from './api.js';
 import type { Company } from './types.js';
 
 /**
- * A safety net for the clinic list. Clinics live in Cloudflare and survive updates, but a backup file
- * means a deleted Worker or a lost database never costs anyone their clinic settings.
+ * A safety net for the business list. Records live in Cloudflare and survive updates; a backup also
+ * helps recover settings if the Worker is deleted. Provider secrets remain encrypted in the file.
  */
 export function BackupPanel({ onRestored, download = true }: { onRestored: (tenants: Company[]) => void; download?: boolean }) {
   const input = useRef<HTMLInputElement | null>(null);
@@ -37,8 +37,8 @@ export function BackupPanel({ onRestored, download = true }: { onRestored: (tena
       const result = await api.restoreBackup(payload);
       onRestored(result.tenants);
       setMessage(result.restored
-        ? `Restored ${result.restored} clinic${result.restored === 1 ? '' : 's'}${result.skipped ? `; ${result.skipped} already existed and were left as they are` : ''}. If a clinic shows Needs attention, enter its keys again under Integrations.`
-        : 'Nothing to restore: every clinic in that file already exists.');
+        ? `Restored ${result.restored} business${result.restored === 1 ? '' : 'es'}${result.skipped ? `; ${result.skipped} already existed and were left as they are` : ''}. If a business shows Needs attention, enter its keys again under Integrations.`
+        : 'Nothing to restore: every business in that file already exists.');
     } catch (cause) {
       setFailed(true); setMessage(cause instanceof Error ? cause.message : 'Could not restore the backup.');
     } finally {
@@ -48,8 +48,8 @@ export function BackupPanel({ onRestored, download = true }: { onRestored: (tena
   }
 
   return <div className="backup-panel">
-    <input ref={input} type="file" accept="application/json,.json" hidden aria-label="Clinic backup file" onChange={(event) => void restore(event.target.files?.[0])} />
-    <div className="backup-text"><strong>Back up your clinics</strong><span>Clinics are kept across updates. A backup file also lets you bring them back if the Worker is ever deleted. Provider keys inside it stay encrypted.</span></div>
+    <input ref={input} type="file" accept="application/json,.json" hidden aria-label="Business backup file" onChange={(event) => void restore(event.target.files?.[0])} />
+    <div className="backup-text"><strong>Back up your businesses</strong><span>Businesses are kept across updates. A backup can also restore them if the Worker is deleted. Provider keys stay encrypted; restoring usable keys requires the same TENANT_CREDENTIALS_ENCRYPTION_KEY.</span></div>
     <div className="backup-actions">
       {download && <button type="button" className="button ghost" disabled={busy} onClick={() => void save()}><Download size={15} /> Download backup</button>}
       <button type="button" className="button ghost" disabled={busy} onClick={() => input.current?.click()}><Upload size={15} /> Restore from backup</button>

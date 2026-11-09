@@ -1,3 +1,5 @@
+import type { EnabledActions } from '../shared/businessTemplates.js';
+
 export interface CalendarSelector {
   event_type_id?: number | null;
   event_type_slug?: string | null;
@@ -24,6 +26,13 @@ export interface Company {
   integration_status?: Record<string, IntegrationStatus>;
   receptionist_config: {
     greeting?: string;
+    persona_name?: string;
+    tone?: string;
+    services?: string[];
+    opening_hours?: string;
+    safety_rules?: string;
+    booking_language?: string;
+    enabled_actions?: Partial<EnabledActions>;
     knowledge_base?: string;
     knowledge_base_file?: { name: string; pages: number; characters: number } | null;
     faqs?: Array<{ question: string; answer: string }>;

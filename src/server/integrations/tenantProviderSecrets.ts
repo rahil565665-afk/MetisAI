@@ -23,7 +23,7 @@ export class SecretsUnreadableError extends Error {
   }
 }
 
-export const SECRETS_UNREADABLE_PROBLEM = 'The saved key could not be read, because this Worker’s TENANT_CREDENTIALS_ENCRYPTION_KEY is not the one that saved it. Enter the key again here; the clinic and all its settings are kept.';
+export const SECRETS_UNREADABLE_PROBLEM = 'The saved key could not be read, because this Worker’s TENANT_CREDENTIALS_ENCRYPTION_KEY is not the one that saved it. Enter the key again here; the business and all its settings are kept.';
 
 const KEY_VERSION = 1;
 const NONCE_BYTES = 12;

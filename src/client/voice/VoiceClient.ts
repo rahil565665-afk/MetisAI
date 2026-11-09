@@ -37,7 +37,7 @@ export interface VoiceClientEvents {
 }
 
 export interface StartOptions {
-  /** `wss://…/agents/<clinic>/ws` */
+  /** `wss://…/agents/<business>/ws` */
   url: string;
   /** Called after the microphone is allowed, so a refused microphone never mints a token. */
   getToken(): Promise<string>;
@@ -133,7 +133,7 @@ export class VoiceClient {
         if (!this.failed) {
           this.events.error(this.ready
             ? 'The connection to the voice agent was lost. Check your internet connection and start a new test call.'
-            : 'The voice agent refused the connection. Check that this clinic is active and try again.');
+            : 'The voice agent refused the connection. Check that this business is active and try again.');
         }
         this.failed = true;
         this.teardown();

@@ -69,6 +69,36 @@ check('an event ID typed as text does not stop creation', m.r.status === 201 && 
 m = await make('Garbage Dental', { geminiApiKey: ' ', supabaseUrl: '   ', supabaseSecretKey: '', calcomApiKey: '', calcomEventLink: '', calcomEventTypeId: '' });
 check('blank optional fields are ignored', m.r.status === 201 && m.grew, m.r.body.error);
 
+console.log('--- all eight business templates provide durable starter settings');
+const templateTenants = new Map();
+for (const template of ['dental', 'salon_spa', 'medical', 'legal', 'restaurant', 'home_services', 'fitness', 'general']) {
+  const createdTemplate = await make(`Template ${template}`, undefined, { business_type: template });
+  templateTenants.set(template, createdTemplate.r.body.tenant);
+  const config = createdTemplate.r.body.tenant?.receptionist_config;
+  check(`${template} template saves greeting, persona, services, safety, FAQs, booking wording and action defaults`,
+    createdTemplate.r.status === 201 && createdTemplate.r.body.tenant.business_type === template &&
+    Boolean(config?.greeting && config?.persona_name && config?.tone && config?.opening_hours && config?.safety_rules && config?.booking_language) &&
+    Array.isArray(config?.services) && config.services.length > 0 && Array.isArray(config?.faqs) && config.faqs.length > 0 &&
+    config?.enabled_actions?.booking === true && config?.enabled_actions?.take_messages === true && config?.enabled_actions?.hand_off === true);
+  const requiresMedicalGuardrails = ['dental', 'medical'].includes(template);
+  check(`${template} ${requiresMedicalGuardrails ? 'has' : 'does not inherit'} medical-only diagnosis safeguards`,
+    requiresMedicalGuardrails ? /Never ask for date of birth, insurance details, payment-card details/.test(config?.safety_rules ?? '') : !/Never ask for date of birth, insurance details, payment-card details/.test(config?.safety_rules ?? ''));
+}
+const legacyDental = await make('Legacy dental client', good, { business_type: 'dental_clinic' });
+check('an older client can still send dental_clinic explicitly and keeps Dental safeguards', legacyDental.r.status === 201 &&
+  legacyDental.r.body.tenant.business_type === 'dental_clinic' && /Do not diagnose/.test(legacyDental.r.body.tenant.receptionist_config.safety_rules));
+let templateUpdate = await api('PATCH', `/tenants/${templateTenants.get('salon_spa').id}`, { receptionist_config: {
+  persona_name: 'Morgan', tone: 'Friendly and concise.', services: ['Haircut'], opening_hours: 'Tue-Sat 9-5',
+  safety_rules: 'Do not promise a chemical treatment is safe.', booking_language: 'Call bookings service visits.',
+  enabled_actions: { booking: false, take_messages: true, hand_off: false },
+} });
+check('custom persona, tone, services, hours, safety, booking words and action switches persist', templateUpdate.status === 200 &&
+  templateUpdate.body.tenant.receptionist_config.persona_name === 'Morgan' &&
+  templateUpdate.body.tenant.receptionist_config.services[0] === 'Haircut' &&
+  templateUpdate.body.tenant.receptionist_config.enabled_actions.booking === false &&
+  templateUpdate.body.tenant.receptionist_config.enabled_actions.take_messages === true &&
+  templateUpdate.body.tenant.receptionist_config.enabled_actions.hand_off === false, JSON.stringify(templateUpdate.body).slice(0, 240));
+
 console.log('--- names that clash, and odd content');
 const clash1 = await make('Same Name Dental', good);
 const clash2 = await make('Same Name Dental', good);
@@ -129,7 +159,7 @@ r = await api('GET', `/tenants/${(created.find((t) => t.name === 'Bad Key Dental
 check('a clinic whose database key is wrong reports the problem instead of failing', r.status === 200 && r.body.connected === false && /rejected that secret key/.test(r.body.problem ?? ''), JSON.stringify(r.body));
 
 console.log('--- the happy paths');
-m = await make('Link Dental', { ...good, calcomApiKey: 'cal_live_good', calcomEventLink: 'https://cal.com/rahil-fjf4vl/30min' });
+m = await make('Link Salon', { ...good, calcomApiKey: 'cal_live_good', calcomEventLink: 'https://cal.com/rahil-fjf4vl/30min' }, { business_type: 'salon_spa' });
 const linkClinic = m.r.body.tenant;
 check('clinic created from a Cal.com link, with no warnings and the agent live', m.r.status === 201 && linkClinic?.agent_status === 'live' && m.r.body.warnings.length === 0, JSON.stringify(m.r.body.warnings));
 check('the link became username + slug', linkClinic?.receptionist_config?.calcom?.username === 'rahil-fjf4vl' && linkClinic?.receptionist_config?.calcom?.event_type_slug === '30min', JSON.stringify(linkClinic?.receptionist_config?.calcom));
@@ -217,7 +247,7 @@ async function talkingCall(id, { approve = true, frames = 45 } = {}) {
     for (const e of c.events) if (e.type === 'approval_request' && !answered.has(e.approvalId)) { answered.add(e.approvalId); c.ws.send(JSON.stringify({ type: 'approval_response', approvalId: e.approvalId, approved: approve })); }
     await sleep(60);
   }
-  for (let n = 0; n < 40 && !c.events.some((e) => e.type === 'transcript' && /booked for you|could not/.test(e.text)); n += 1) {
+  for (let n = 0; n < 40 && !c.events.some((e) => e.type === 'transcript' && /booking is confirmed|could not complete that booking/.test(e.text)); n += 1) {
     for (const e of c.events) if (e.type === 'approval_request' && !answered.has(e.approvalId)) { answered.add(e.approvalId); c.ws.send(JSON.stringify({ type: 'approval_response', approvalId: e.approvalId, approved: approve })); }
     await sleep(100);
   }
@@ -230,17 +260,17 @@ const apptsBefore = (await db(9921)).receptionist_appointments.length;
 const logsBefore = (await db(9921)).call_logs.length;
 c = await talkingCall(linkClinic.id);
 const ms = await mockState();
-const prepares = ms.toolResponses.filter((x) => x.name === 'prepare_dental_booking');
+const prepares = ms.toolResponses.filter((x) => x.name === 'prepare_booking');
 check('an email that is not an address is refused, and the receptionist tries again', prepares.length === 2 && prepares[0].response.ok === false && /email/i.test(prepares[0].response.message) && prepares[1].response.ok === true, JSON.stringify(prepares).slice(0, 300));
 check('the details are read back with the email spelled out', prepares[1]?.response.read_back?.email_spelled === 'a, d, a, at, e, x, a, m, p, l, e, dot, c, o, m' && /^\+1/.test(prepares[1]?.response.read_back?.phone_digits ?? ' ') === false && prepares[1]?.response.read_back?.phone_digits === '1 4 1 5 5 5 5 0 1 2 3', JSON.stringify(prepares[1]?.response.read_back));
 const approvals = c.events.filter((e) => e.type === 'approval_request');
-check('the browser is asked to approve exactly the confirmed details', approvals.length === 1 && approvals[0].summary.patientEmail === 'ada@example.com' && approvals[0].summary.patientPhone === '+14155550123', JSON.stringify(approvals.map((a) => a.summary)));
+check('the browser is asked to approve exactly the confirmed details', approvals.length === 1 && approvals[0].summary.callerEmail === 'ada@example.com' && approvals[0].summary.callerPhone === '+14155550123', JSON.stringify(approvals.map((a) => a.summary)));
 const posts = ms.calRequests.filter((x) => x.method === 'POST');
-check('Cal.com receives one real booking with the email, phone and reason', posts.length === 1 && posts[0].body.attendee.email === 'ada@example.com' && posts[0].body.attendee.phoneNumber === '+14155550123' && posts[0].body.metadata?.reason === 'Checkup', JSON.stringify(posts.map((x) => x.body)));
-check('the receptionist is told it worked and says so', ms.toolResponses.some((x) => x.name === 'create_dental_booking' && x.response.ok) && c.events.some((e) => e.type === 'transcript' && /booked for you/.test(e.text)));
+check('the Cal.com fake receives one Salon/Spa booking with the email, phone and service', posts.length === 1 && posts[0].body.attendee.email === 'ada@example.com' && posts[0].body.attendee.phoneNumber === '+14155550123' && posts[0].body.metadata?.reason === 'Haircut', JSON.stringify(posts.map((x) => x.body)));
+check('the receptionist is told the Salon/Spa booking succeeded and says so', ms.toolResponses.some((x) => x.name === 'create_booking' && x.response.ok) && c.events.some((e) => e.type === 'transcript' && /booking is confirmed/.test(e.text)));
 const afterDb = await db(9921);
 const appt = afterDb.receptionist_appointments.at(-1);
-check('the appointment is saved in the clinic\'s database with the contact details', afterDb.receptionist_appointments.length === apptsBefore + 1 && appt.attendee_email === 'ada@example.com' && appt.attendee_phone === '+14155550123' && appt.attendee_name === 'Ada Lovelace', JSON.stringify(appt));
+check('the booking is saved in the business\'s database with the contact details', afterDb.receptionist_appointments.length === apptsBefore + 1 && appt.attendee_email === 'ada@example.com' && appt.attendee_phone === '+14155550123' && appt.attendee_name === 'Ada Lovelace', JSON.stringify(appt));
 const log = afterDb.call_logs.at(-1);
 check('the call is saved, finished, with the caller\'s name', afterDb.call_logs.length === logsBefore + 1 && log.status === 'completed' && log.caller_name === 'Ada Lovelace' && log.ended_at, JSON.stringify({ ...log, metadata: undefined }));
 check('with what happened and the whole conversation', /^Booked Ada Lovelace/.test(log.metadata.outcome) && log.metadata.transcript.some((t) => t.role === 'user' && /Yes, that is all correct/.test(t.text)) && log.metadata.transcript.some((t) => t.role === 'assistant' && /Is all of that correct/.test(t.text)) && log.metadata.events.length === 1, JSON.stringify(log.metadata).slice(0, 300));
@@ -263,7 +293,7 @@ const postsBefore = 0;
 c = await talkingCall(linkClinic.id, { approve: false });
 const ms2 = await mockState();
 check('nothing is sent to Cal.com', ms2.calRequests.filter((x) => x.method === 'POST').length === postsBefore, JSON.stringify(ms2.calRequests.map((x) => x.method + x.url)));
-check('and the receptionist is told it was not approved', ms2.toolResponses.some((x) => x.name === 'create_dental_booking' && x.response.ok === false && /not approved/.test(x.response.message)));
+check('and the receptionist is told it was not approved', ms2.toolResponses.some((x) => x.name === 'create_booking' && x.response.ok === false && /not approved/.test(x.response.message)));
 
 console.log('--- when booking cannot work, the receptionist and the browser are told');
 const badCal = (await make('Bad Cal Dental', { ...good, calcomApiKey: 'cal_live_wrong', calcomEventTypeId: '4242' })).r.body.tenant;

@@ -15,11 +15,11 @@ export async function requirePlatformAdmin(req: Request): Promise<AppUser> {
 }
 
 /**
- * The console has a single administrator who manages every clinic. Per-clinic roles are not part of
+ * The console has a single administrator who manages every business. Per-business roles are not part of
  * this release, so anything other than the administrator is refused.
  */
 export async function requireTenantRole(req: Request, _tenantId: string, _roles?: string[]): Promise<{ user: AppUser; role: string }> {
   const user = await requireUser(req);
   if (user.is_platform_admin) return { user, role: 'platform_admin' };
-  throw new HttpError(403, 'You do not have access to this clinic.');
+  throw new HttpError(403, 'You do not have access to this business.');
 }

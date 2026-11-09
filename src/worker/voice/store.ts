@@ -9,8 +9,8 @@ import {
 } from '../../server/integrations/clinicDatabase.js';
 import type { CallStore } from './receptionist.js';
 
-export const NO_DATABASE_PROBLEM = 'No Supabase database is connected to this clinic, so this call is not saved to the history. Add one under Integrations → Clinic Supabase database.';
-const UNSAVED_PROBLEM = 'The call history could not be saved. Check the clinic’s Supabase connection under Integrations.';
+export const NO_DATABASE_PROBLEM = 'No Supabase database is connected to this business, so this call is not saved to the history. Add one under Integrations → Business Supabase database.';
+const UNSAVED_PROBLEM = 'The call history could not be saved. Check the business’s Supabase connection under Integrations.';
 
 /** Advice that is safe to show as it is, or a general line when the failure was not one we recognise. */
 function problemText(error: unknown): string {

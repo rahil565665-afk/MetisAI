@@ -1,124 +1,111 @@
-# MetisAI — multi-tenant voice receptionist for dental clinics
+# Metis AI — multi-business voice receptionist builder
 
-An admin console for running one AI voice receptionist per clinic. An administrator signs in with a passcode, creates clinics, saves each clinic's provider keys, and tests the receptionist by talking to it in the browser. Everything runs on **Cloudflare, including the free Workers plan**: the console is a Worker, and each clinic's voice agent runs inside its own Durable Object, talking to Google's Gemini Live API.
+Metis AI is an admin console for setting up one AI voice receptionist per business. Choose a starter template—Dental, Salon/Spa, Medical, Legal, Restaurant, Home services, Fitness, or General—then tailor its greeting, persona, tone, services, hours, safety guidance, FAQs, booking language, and enabled actions. The receptionist can be tested by speaking to it in the browser.
 
-- **Voice:** Gemini Live native speech, over a WebSocket held by the clinic's Durable Object. No servers, containers or Python.
-- **Scheduling:** Cal.com API v2 — availability, booking, rescheduling, cancellation. Changes need the person on the call to approve the exact action in the browser.
-- **Data:** each clinic has **its own Supabase project** (Postgres) for call history and appointments. You enter that project's URL and secret key when you add the clinic; the key is stored encrypted and used only by the Worker. Nothing from one clinic is stored with another's.
-- **Telephony:** not implemented. Twilio fields store credentials only.
+The application runs on Cloudflare Workers, including the Free plan. Each business has its own settings, encrypted provider credentials, voice agent, and Supabase project for call history. Gemini Live provides the browser voice test; Cal.com is an optional booking integration. Phone calls are not implemented.
 
-> This is a browser-tested receptionist, not a phone system, and it is not certified for healthcare compliance (HIPAA, GDPR, etc.). Do not use real patient data until you have completed your own privacy, consent and retention review.
+- **Voice:** Gemini Live native speech over a WebSocket held by the business's Durable Object.
+- **Booking:** optional Cal.com API v2 integration for availability, bookings, changes, and cancellations. The caller must confirm the exact read-back and a user must approve the change in the browser.
+- **Data:** each business connects its own Supabase project. Call history and booking records stay in that project; provider credentials are encrypted and used only by the Worker.
+- **Telephony:** not implemented. Twilio fields store credentials only; they do not enable phone calls.
+
+> This is a browser-tested receptionist, not a phone system, and it is not certified for healthcare or other regulatory compliance. Before using real caller information, complete your own privacy, consent, retention, and applicable compliance review.
+
+## Create your first receptionist
+
+Start with the short [Create your first receptionist guide](docs/first-receptionist.md). It covers choosing a template, setting the receptionist's behavior, connecting only the services you need, and testing safely.
 
 ## How it fits together
 
 ```
 Browser ──HTTPS──▶ Cloudflare Worker  (src/worker/index.ts)
   │                  ├─ static dashboard (React, Workers Assets)
-  │                  ├─ /api/*   Express 5 app (src/server) ──▶ the clinic's own Supabase
-  │                  ├─ Registry Durable Object      (list of clinics + their encrypted keys)
-  │                  ├─ LoginLimiter Durable Object  (brute-force protection)
-  │                  └─ /agents/<clinicId>/ws
-  │                        └─▶ ClinicAgent Durable Object  (one per clinic)
-  │                               ├─▶ Gemini Live  (outbound WebSocket)
-  └── microphone / speaker        ├─▶ Cal.com API
-      audio over one WebSocket    └─▶ that clinic's Supabase  (call + appointment metadata)
+  │                  ├─ /api/tenants/*  Express 5 app (src/server)
+  │                  ├─ Registry Durable Object (business settings + encrypted keys)
+  │                  ├─ LoginLimiter Durable Object (brute-force protection)
+  │                  └─ /agents/<businessId>/ws
+  │                        └─▶ ClinicAgent Durable Object (one per business; legacy class name)
+  │                               ├─▶ Gemini Live (outbound WebSocket)
+  └── microphone / speaker        ├─▶ Cal.com API (optional)
+      audio over one WebSocket    └─▶ that business's Supabase project
 ```
 
-A voice test opens a single WebSocket from the browser to the clinic's Durable Object. The object connects out to Gemini, relays audio both ways, runs the receptionist's tools, and goes away when the call ends. Between calls nothing runs and nothing is billed. Details are in [docs/architecture.md](docs/architecture.md).
+A voice test opens a WebSocket from the browser to the business's Durable Object. The object connects to Gemini, relays audio, and runs only for the duration of the call. See [docs/architecture.md](docs/architecture.md) for the trust boundaries and booking approval flow.
 
-## Deploy (free Cloudflare account)
+## Deploy on Cloudflare
 
-Follow **[docs/deploy-cloudflare.md](docs/deploy-cloudflare.md)**. In short:
+Follow [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md). In short:
 
-1. Import this repository into Cloudflare as a Worker with Workers Builds (build `pnpm build`, deploy `npx wrangler deploy`). The free plan is enough.
-2. Add four secrets to the Worker (`APP_PUBLIC_URL` is its final HTTPS origin), then sign in.
-3. For each clinic, create a Supabase project and run `supabase/clinic-schema.sql` in its SQL Editor once.
-4. **Add clinic agent**: paste that clinic's Supabase URL and secret key, its Gemini API key and (optionally) its Cal.com details, then press **Start browser test**.
-
-### What the free plan allows
-
-| Limit (Workers Free) | Value | This app |
-| --- | --- | --- |
-| Worker + Durable Object requests | 100,000 / day each, shared | A call costs about 30 billed requests per minute of talking; a dashboard visit a few dozen. |
-| Durable Object duration | 13,000 GB-s / day | About 0.13 GB-s per connected second — roughly 28 hours of calls a day. |
-| CPU per HTTP request | 10 ms | Dashboard API calls are small; see *Known limits*. Voice runs in the Durable Object, which gets 30 s per message. |
-| Worker size | 64 MiB uncompressed | About 1.6 MiB. |
-
-That is plenty for testing and a handful of clinics. Calls are capped at 30 minutes and end after 3 minutes of silence (with a warning 30 seconds before either), so a forgotten browser tab cannot burn the daily allowance. Longer calls ride through Gemini's own connection limits by resuming the same conversation on a fresh connection. Numbers and caveats: [docs/architecture.md](docs/architecture.md#free-plan-budget).
+1. Import the repository as a Worker with Workers Builds (`pnpm build`, then `npx wrangler deploy`). The Worker name must remain `metisai`.
+2. Add the four Cloudflare Secrets listed below, then sign in.
+3. For each business whose call history should be saved, create its Supabase project and run `supabase/clinic-schema.sql` in that project's SQL Editor. The filename is retained for existing instructions and links.
+4. Add a business from the console, choose a template, and enter provider details. Only the business name is required; a missing or rejected provider does not block creation.
 
 ## Configuration
 
-All values are Cloudflare **Secrets** in production (type *Secret*, not *Text*; `wrangler.jsonc` sets `keep_vars` so deploys never delete dashboard variables) (`.dev.vars` for `pnpm dev:worker`, `.env` for `pnpm dev`).
+Production values belong in Cloudflare **Secrets** (type *Secret*, not *Text*). `wrangler.jsonc` uses `keep_vars: true` so deploys do not delete dashboard variables. For local runs, use `.dev.vars` or `.env` as described in the deployment guide.
 
-| Name | Purpose |
+| Secret | Purpose |
 | --- | --- |
 | `DASHBOARD_ADMIN_PASSCODE` | Sign-in passcode, 8–128 characters. |
-| `DASHBOARD_SESSION_SECRET` | 32 random bytes (64 hex). Signs sessions and derives each clinic's voice-token key. |
-| `TENANT_CREDENTIALS_ENCRYPTION_KEY` | 32 random bytes (64 hex). Encrypts saved provider keys (AES-256-GCM). **Back it up and never regenerate it** — if it changes, saved keys can no longer be read and have to be entered again (the clinics themselves are kept). |
-| `APP_PUBLIC_URL` | Exact public origin, e.g. `https://metisai.<you>.workers.dev`. HTTPS, no path. |
+| `DASHBOARD_SESSION_SECRET` | 32 random bytes (64 hex). Signs sessions and derives each business's voice-token key. |
+| `TENANT_CREDENTIALS_ENCRYPTION_KEY` | 32 random bytes (64 hex). Encrypts saved provider keys. Back it up and never regenerate it; if changed, provider keys must be entered again, but businesses and settings remain. |
+| `APP_PUBLIC_URL` | Exact public HTTPS origin, e.g. `https://metisai.<your-subdomain>.workers.dev`, without a path. |
 
-Generate the two random keys with `openssl rand -hex 32`. The server refuses to run with a missing or malformed value rather than falling back to a default.
+Generate random keys with `openssl rand -hex 32`. Optional non-secret variables are `GEMINI_LIVE_MODEL` and `GEMINI_VOICE_NAME`; defaults are documented in the Cloudflare guide.
 
-Optional, non-secret overrides (plain variables, only if Google renames things): `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`) and `GEMINI_VOICE_NAME` (default `Charon`).
+Provider details (each business's Supabase URL and secret key, Gemini API key, optional Cal.com key/event, and unused Twilio fields) are entered in the console, not stored as environment variables. The console checks connections but saves the business even when a provider check fails, then reports what needs attention.
 
-Per-clinic provider details — the clinic's **Supabase URL and secret key**, Gemini key, Cal.com key and event, Twilio — are entered in the console UI, not as environment variables. The console checks them when you save (it test-writes one row to the clinic's database, asks Google whether the Gemini key is accepted, and asks Cal.com for the event's availability) and tells you plainly what is wrong.
-
-## Local development
+## Local development and checks
 
 Requires Node 22+ and pnpm 11.
 
 ```bash
 pnpm install
-cp .env.example .env        # fill in the values
+cp .env.example .env        # fill in local values
 pnpm dev                    # API on :3001, web on :3000
 ```
 
-`pnpm dev` runs the API and dashboard on plain Node, so sign-in, clinic management and integrations work (the clinic list is kept in memory and forgotten when the API restarts), but voice tests need the Worker runtime. For those run `pnpm dev:worker` (copy `.dev.vars.example` to `.dev.vars` first; no Docker needed).
+`pnpm dev` keeps its in-memory business list only until the API restarts. Voice tests need the Worker runtime; see [e2e/README.md](e2e/README.md) for the local Worker setup.
 
 | Command | What it does |
 | --- | --- |
-| `pnpm check` | Typecheck and run the unit tests. |
+| `pnpm check` | Typecheck and run unit tests. |
 | `pnpm build` | Typecheck and build the dashboard into `dist/client`. |
+| `pnpm e2e` | Run the local Worker and browser end-to-end suites against service fakes. |
 | `pnpm types` | Regenerate `worker-configuration.d.ts` after changing `wrangler.jsonc`. |
-| `pnpm deploy` | Build and deploy from your machine (needs `wrangler login`). |
 
-### End-to-end tests
+The end-to-end fakes cover business creation and templates, browser booking approval, call history, responsive Overview states, restart, and backup/restore. They do not verify that real Gemini Live, Cal.com, or Supabase accepts the requests; those require a controlled test on the owner's accounts. E2E suites are not part of CI.
 
-`pnpm check` runs the typecheck and unit tests. `pnpm e2e` (see `e2e/README.md`) additionally runs the real Worker and the dashboard in Chrome against local fakes of Gemini, Cal.com and Supabase: creating clinics, a full booking call with the spoken-email read-back, call history, restarts, and backup/restore. It is not part of CI.
+## Security and compatibility
 
-## Security model
-
-- Passcode sign-in is rate-limited per client IP in a Durable Object (8 failures per 15 minutes), compared in constant time, and issues an 8-hour signed `HttpOnly`, `SameSite=Lax`, `Secure` session cookie. There is no hard-coded fallback secret; production fails closed if one is missing.
-- Mutating browser requests must come from the console's own origin.
-- Provider keys (including each clinic's Supabase secret key) are encrypted before storage, bound to their clinic as authenticated data, never returned to the browser, and decrypted only when needed. The Gemini key travels to Google in a request header, never in a URL. Public Supabase keys (anon / publishable) are refused.
-- Browsers connect to a clinic's agent with a 3-minute token signed with a key derived for that clinic only; a token for one clinic is rejected by every other clinic. The agent also checks the browser `Origin`. The token travels in the WebSocket subprotocol header, not the URL, so it does not appear in request logs.
-- Booking, rescheduling and cancelling require an explicit click in the browser. Spoken consent never counts, silence counts as "no", and a reschedule or cancel is offered only if the supplied email matches the booking's attendee.
-- Audio, transcripts and caller identity are not stored. Call logs are metadata only; appointment records can include the attendee's name and email, and live in the clinic's own Supabase project.
+- Passcode sign-in is rate-limited and issues an 8-hour signed `HttpOnly`, `SameSite=Lax`, `Secure` cookie. Mutating browser requests must come from the console's own origin.
+- Provider keys are encrypted before storage, bound to the business as authenticated data, never returned to the browser, and decrypted only when needed. Public Supabase keys are refused.
+- A three-minute token authorizes the browser voice test for one business only. The agent checks the browser `Origin` and token; the token is carried in a WebSocket subprotocol, not the URL.
+- Booking, rescheduling, and cancellation require a caller's clear spoken confirmation of the exact read-back and a separate approval click in the browser. Disabled actions are omitted from model tools and rejected server-side.
+- Raw audio is not recorded. Call transcripts and caller details may be personal information; call history is stored in the business's own Supabase project. Configure retention and consent yourself.
+- The Registry and encrypted provider keys live in a SQLite-backed Durable Object, not in a central Supabase database. Downloaded backups retain the legacy `app: "metisai-clinics"` format and include encrypted keys; restoration requires the same `TENANT_CREDENTIALS_ENCRYPTION_KEY` and only adds businesses.
+- Existing data contracts are deliberately retained: `/api/tenants`, the Durable Object classes `Registry`, `ClinicAgent`, and `LoginLimiter`, the encryption-context strings and WebSocket subprotocol still use their established names. Existing `call_logs` and `receptionist_appointments` tables and columns are not renamed. There is no schema migration for the template settings; they are stored additively in the existing Registry configuration.
+- Requests from older clients that omit `business_type` keep the established dental default (`dental_clinic`); the new picker defaults to General. Existing dental businesses retain dental safety rules.
 
 ## Project layout
 
 | Path | Contents |
 | --- | --- |
-| `src/client/` | React dashboard, and `voice/` — the browser microphone, resampler and player. |
-| `src/server/` | Express API: auth, clinics, integrations, voice tokens; `registry/` is the clinic list. |
-| `src/worker/` | Worker entry, `ClinicAgent`, `Registry` and `LoginLimiter` Durable Objects, token helpers. |
-| `src/worker/voice/` | The receptionist: Gemini Live protocol, call session, Cal.com client, approval gate. |
-| `src/shared/` | The browser ↔ agent message protocol. |
-| `supabase/clinic-schema.sql` | The tables each clinic's own Supabase project needs. Run once per clinic. |
-| `docs/` | Architecture, deployment guide, provider references. |
+| `src/client/` | React dashboard, voice tester, and browser microphone/audio client. |
+| `src/server/` | Express API, authorization, integrations, and Registry logic. |
+| `src/worker/` | Worker entry, `ClinicAgent`, `Registry`, and `LoginLimiter` Durable Objects. |
+| `src/worker/voice/` | Gemini Live protocol, receptionist prompt/tools, session, Cal.com client, approval gate. |
+| `src/shared/businessTemplates.ts` | The eight template defaults and helper functions. |
+| `supabase/clinic-schema.sql` | Existing per-business schema; its legacy filename and table/column names are retained. |
+| `docs/` | Architecture, first-receptionist guide, Cloudflare deployment, and provider references. |
 
 ## Known limits
 
-- **Not tested against live providers.** The whole call path has been run end to end in the local Workers runtime and a real Chrome with a fake microphone, against stand-ins for Gemini, Cal.com and Supabase. It has not been run against the real Gemini Live service, so confirm the model name, key access and voice quality with a real test call after you deploy.
-- **Dashboard CPU on the free plan is unmeasured.** Free Workers allow 10 ms of CPU per HTTP request, and local runs cannot enforce or measure that. The API does little work per request, but if a page ever fails with Cloudflare error 1102, that limit is the cause; moving to Workers Paid ($5/month) raises it.
-- One live test call per clinic at a time. A deploy or Cloudflare restart can drop a call in progress; the browser shows the call as ended.
-- Voices are Gemini's built-in voices only (Cartesia support from the earlier container version was removed).
-- The knowledge base is the text of one uploaded PDF (plus FAQs). The text is read in your browser and only the text is saved; the PDF itself is not stored. The first 60,000 characters are used, scanned or image-only PDFs have no text to read and are rejected with a message, and embeddings and vector search are not implemented.
-- Human hand-off in the browser raises a logged escalation event; it does not dial a phone.
-- The list of clinics and their encrypted keys live in a Durable Object (free SQLite-backed storage), not in Supabase. It survives deploys and restarts, but it is one place: if you delete the Worker, the clinic list goes with it. **Download backup** (Overview page) saves every clinic and its encrypted keys to a file; **Restore from backup** adds them back to a Worker that has lost them. Keep the file together with your `TENANT_CREDENTIALS_ENCRYPTION_KEY`.
-- Adding a clinic is never blocked by a provider check. Only the clinic name is required; a wrong key, a missing table or an unknown Cal.com event is saved, shown as *Needs attention* with the reason, and listed in a banner after the clinic is created, so you can fix it later under Integrations. The one exception is a value that cannot be stored safely at all (a URL that is not a Supabase project, a public Supabase key, an unreadable Cal.com link), which is reported and left out.
-- A Supabase project that was set up with an earlier version of this project has a foreign key to a `companies` table. When the database reports that link, the Worker adds the one `companies` row it asks for and retries, so call history saves without any SQL. Running `supabase/clinic-schema.sql` removes the link for good.
-- A clinic whose Supabase project is unreachable still takes calls; its call history is just not saved until the connection works again (the console says so on the Overview and Call activity pages, and the voice test page says so as soon as a call starts).
-- Call history includes the conversation text, stored only in the clinic's own Supabase project (`call_logs.metadata`). It can contain personal information: decide on retention and consent before using real patient data. Raw audio is never recorded.
-- Booking needs a caller's confirmation of their spoken name, phone number and email, then your click on **Approve action** in the browser. The receptionist cannot book without both. It has still never booked on a real Cal.com account in this project's tests; do one real test booking after you deploy.
-- Earlier versions kept every clinic in one central Supabase database. That data is not migrated: recreate the clinic, and the old central tables can be deleted from that project.
+- **Live providers have not been verified by the automated tests.** The local Worker and Chrome have been exercised against fakes, not real Gemini Live, Cal.com, or Supabase. Do a controlled test call and booking after deployment; never use real customer details in a first test.
+- The Free plan's 10 ms CPU limit for HTTP requests has not been measured in production. See the architecture guide for the budget and caveats.
+- One browser test call per business at a time. A deploy or Cloudflare restart can end an active call.
+- The only supported voice mode is Gemini's native audio. The knowledge base is text extracted in the browser from one PDF plus FAQs; the PDF is not stored, and embeddings/vector search are not implemented.
+- Staff handoff records an event in the call history; it does not transfer a phone call. Twilio phone transport is not implemented.
+- A business without a connected Supabase project can still be created and tested, but its calls and messages cannot be saved to call history. With Supabase connected but no usable Cal.com scheduling, enabled non-booking actions remain available.
+- Earlier versions may have used a central Supabase database; that data is not automatically migrated. Existing per-business deployments and their call/booking tables are preserved.

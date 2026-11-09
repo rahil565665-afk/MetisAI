@@ -54,12 +54,12 @@ export async function setupDatabase(tenantId: string, urlInput: string, keyInput
   } catch (error) {
     problem = error instanceof HttpError ? error.message : 'Could not check this database right now. Try saving it again in a moment.';
   }
-  const note = 'Stored encrypted; call history is written to the clinic’s own project';
+  const note = 'Stored encrypted; call history is written to the business’s own project';
   return {
     secrets: { supabaseUrl: url, supabaseSecretKey: key },
     status: problem ? { configured: false, updatedAt, note, problem } : { configured: true, updatedAt, note },
     ...(problem ? { warning: problem } : {}),
-    message: problem ? savedButBroken(problem) : 'Connected. Call history and appointments will now be saved to this Supabase project.',
+    message: problem ? savedButBroken(problem) : 'Connected. Call history and booking activity will now be saved to this Supabase project.',
   };
 }
 
@@ -101,7 +101,7 @@ export async function setupCalendar(input: CalendarInput, stored: { apiKey?: str
   else if (unreachable) message = 'Saved, but Cal.com could not be reached to confirm it just now. Try a voice test to check.';
   if (parsed?.note) message = `${message} ${parsed.note}`;
 
-  const note = 'API key stored encrypted; event is clinic configuration';
+  const note = 'API key stored encrypted; event is business configuration';
   return {
     secrets: newKey ? { calcomApiKey: newKey } : {},
     status: problem ? { configured: false, updatedAt, note, problem } : { configured: Boolean(apiKey) && complete, updatedAt, note },

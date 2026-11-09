@@ -27,6 +27,7 @@ import { parseEventTypeId, setupCalendar, setupDatabase, setupGemini, type Provi
 import type { Company, IntegrationState } from '../types.js';
 import { getClinicAgentRuntime } from '../agent-runtime.js';
 import { assertServerConfig, voiceTokenSigningKeyHex } from '../config.js';
+import { BUSINESS_TEMPLATE_IDS, defaultReceptionistSettings, defaultActions, getBusinessTemplate } from '../../shared/businessTemplates.js';
 
 export const apiRouter = Router();
 
@@ -34,8 +35,8 @@ export const apiRouter = Router();
 const isProvisioned = (company: Company): boolean => company.agent_status === 'live';
 
 const DEFAULT_GREETING = 'Thank you for calling. How can I help you today?';
-const DATABASE_NOT_CONNECTED = 'No Supabase database is connected to this clinic yet, so call history is not saved. Add it under Integrations → Clinic Supabase database.';
-const DATABASE_UNREADABLE = 'Could not read this clinic’s Supabase database. Check the connection under Integrations.';
+const DATABASE_NOT_CONNECTED = 'No Supabase database is connected to this business yet, so call history is not saved. Add it under Integrations → Business Supabase database.';
+const DATABASE_UNREADABLE = 'Could not read this business’s Supabase database. Check the connection under Integrations.';
 
 /** Why the clinic's database cannot be read: what the last check found, or a general message. */
 async function databaseProblem(id: string): Promise<string> {
@@ -53,7 +54,7 @@ const PROVIDERS = ['gemini', 'calcom', 'supabase', 'twilio'] as const;
 function tenantId(req: Request): string {
   const raw = req.params.tenantId;
   const value = Array.isArray(raw) ? raw[0] ?? '' : String(raw ?? '');
-  if (!UUID_PATTERN.test(value)) throw new HttpError(400, 'The clinic identifier is invalid.');
+  if (!UUID_PATTERN.test(value)) throw new HttpError(400, 'The business identifier is invalid.');
   return value.toLowerCase();
 }
 
@@ -81,9 +82,9 @@ async function endClinicCall(id: string): Promise<boolean> {
 apiRouter.get('/health', (_req, res) => {
   try {
     assertServerConfig();
-    res.json({ ok: true, service: 'dentdesk-dashboard', configurationReady: true });
+    res.json({ ok: true, service: 'metisai-dashboard', configurationReady: true });
   } catch {
-    res.status(503).json({ ok: false, service: 'dentdesk-dashboard', configurationReady: false });
+    res.status(503).json({ ok: false, service: 'metisai-dashboard', configurationReady: false });
   }
 });
 
@@ -146,7 +147,7 @@ const restoreSchema = z.object({
 apiRouter.post('/backup/restore', asyncRoute(async (req, res) => {
   await requirePlatformAdmin(req);
   const parsed = restoreSchema.safeParse(req.body);
-  if (!parsed.success) throw new HttpError(400, 'That file is not a clinic backup from this console. Choose a file downloaded with Download backup.');
+  if (!parsed.success) throw new HttpError(400, 'That file is not a business backup from this console. Choose a file downloaded with Download backup.');
   const result = await restoreBackup({ companies: parsed.data.companies as Company[], secrets: parsed.data.secrets });
   res.json({ ...result, tenants: await listCompanies() });
 }));
@@ -155,11 +156,20 @@ apiRouter.post('/backup/restore', asyncRoute(async (req, res) => {
 const clamped = (max: number) => z.string().transform((value) => value.trim().slice(0, max));
 
 const createTenantSchema = z.object({
-  name: z.string().trim().min(1, 'Enter the clinic’s name.').max(160),
+  name: z.string().trim().min(1, 'Enter the business name.').max(160),
+  business_type: z.union([z.enum(BUSINESS_TEMPLATE_IDS), z.literal('dental_clinic')]).optional(),
   slug: clamped(80).optional(),
   timezone: clamped(64).optional(),
   receptionist_config: z.object({
     greeting: clamped(800).optional(),
+    persona_name: clamped(80).optional(),
+    tone: clamped(500).optional(),
+    services: z.array(clamped(120)).max(40).optional(),
+    opening_hours: clamped(1200).optional(),
+    safety_rules: clamped(3000).optional(),
+    booking_language: clamped(1000).optional(),
+    faqs: z.array(z.object({ question: clamped(300), answer: clamped(2000) })).transform((list) => list.slice(0, 50)).optional(),
+    enabled_actions: z.object({ booking: z.boolean().optional(), take_messages: z.boolean().optional(), hand_off: z.boolean().optional() }).optional(),
     knowledge_base: z.string().optional(),
     knowledge_base_file: z.unknown().optional(),
   }).strict().optional(),
@@ -174,7 +184,7 @@ const createTenantSchema = z.object({
 }).strict();
 
 function slugify(text: string): string {
-  return text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '') || 'clinic';
+  return text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '') || 'business';
 }
 
 const NOT_SET_UP: Record<string, IntegrationState> = {
@@ -192,30 +202,38 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
   }
   const given = input.integrations ?? {};
   const config = input.receptionist_config ?? {};
+  // Requests predating the picker omit business_type; retain their established dental defaults.
+  const businessType = input.business_type ?? 'dental_clinic';
+  const template = getBusinessTemplate(businessType);
+  const defaultSettings = defaultReceptionistSettings(businessType);
+  const enabledActions = { ...defaultActions(), ...defaultSettings.enabled_actions, ...config.enabled_actions };
 
   // Nothing about a clinic's providers can stop it being created. The clinic is made first (a name clash
   // just gets a number added), then each provider is saved and checked, and whatever is wrong is reported.
   const knowledge = cleanKnowledgeText(config.knowledge_base);
   const knowledgeFile = knowledge ? cleanKnowledgeFile(config.knowledge_base_file, knowledge.length) : null;
   const receptionistConfig: Record<string, unknown> = {
+    ...defaultSettings,
+    ...config,
     clinic_name: input.name,
-    greeting: config.greeting || DEFAULT_GREETING,
+    greeting: config.greeting || template.greeting.replaceAll('{{business_name}}', input.name).replaceAll('{{persona_name}}', config.persona_name || template.personaName) || DEFAULT_GREETING,
     knowledge_base: knowledge,
     ...(knowledgeFile ? { knowledge_base_file: knowledgeFile } : {}),
-    faqs: [],
-    transfer_enabled: true,
+    faqs: config.faqs ?? defaultSettings.faqs,
+    enabled_actions: enabledActions,
+    transfer_enabled: enabledActions.hand_off,
     calcom: { event_type_id: null, event_type_slug: null, username: null, team_slug: null },
   };
   const base = slugify(input.slug || input.name);
   let company: Company | null = null;
   for (let attempt = 1; attempt <= 50 && !company; attempt += 1) {
     try {
-      company = await createCompany({ slug: attempt === 1 ? base : `${base}-${attempt}`, name: input.name, business_type: 'dental_clinic', timezone: input.timezone || 'UTC', receptionist_config: receptionistConfig });
+      company = await createCompany({ slug: attempt === 1 ? base : `${base}-${attempt}`, name: input.name, business_type: businessType, timezone: input.timezone || 'UTC', receptionist_config: receptionistConfig });
     } catch (error) {
       if (!(error instanceof HttpError) || error.status !== 409) throw error;
     }
   }
-  if (!company) throw new HttpError(409, 'Could not find a free service name for this clinic. Try a different clinic name.');
+  if (!company) throw new HttpError(409, 'Could not find a free business identifier. Try a different business name.');
   const clinic = company;
 
   const warnings: string[] = [];
@@ -235,9 +253,9 @@ apiRouter.post('/tenants', asyncRoute(async (req, res) => {
   };
 
   if (given.supabaseUrl || given.supabaseSecretKey) {
-    await attempt('supabase', 'The clinic database', () => setupDatabase(clinic.id, given.supabaseUrl ?? '', given.supabaseSecretKey ?? ''));
+    await attempt('supabase', 'The business database', () => setupDatabase(clinic.id, given.supabaseUrl ?? '', given.supabaseSecretKey ?? ''));
   } else {
-    warnings.push('No database is connected, so call history will not be saved. Add the clinic’s Supabase project under Integrations → Clinic Supabase database.');
+    warnings.push('No database is connected, so call history will not be saved. Add the business’s Supabase project under Integrations → Business Supabase database.');
   }
   if (given.geminiApiKey) {
     await attempt('gemini', 'The Gemini key', () => setupGemini(given.geminiApiKey ?? ''));
@@ -279,9 +297,16 @@ apiRouter.get('/tenants/:tenantId', asyncRoute(async (req, res) => {
 const receptionistConfigSchema = z.object({
   clinic_name: clamped(160).optional(),
   greeting: clamped(800).optional(),
+  persona_name: clamped(80).optional(),
+  tone: clamped(500).optional(),
+  services: z.array(clamped(120)).max(40).optional(),
+  opening_hours: clamped(1200).optional(),
+  safety_rules: clamped(3000).optional(),
+  booking_language: clamped(1000).optional(),
   knowledge_base: z.string().optional(),
   knowledge_base_file: z.unknown().optional(),
   faqs: z.array(z.object({ question: clamped(300), answer: clamped(2000) })).transform((list) => list.slice(0, 50)).optional(),
+  enabled_actions: z.object({ booking: z.boolean().optional(), take_messages: z.boolean().optional(), hand_off: z.boolean().optional() }).optional(),
   transfer_enabled: z.boolean().optional(),
   calcom: z.object({
     event_type_id: z.number().int().positive().nullable().optional(),
@@ -295,7 +320,7 @@ apiRouter.patch('/tenants/:tenantId', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requireTenantRole(req, id, ['owner', 'manager']);
   const schema = z.object({
-    name: z.string().trim().min(1, 'The clinic name cannot be empty.').max(160).optional(),
+    name: z.string().trim().min(1, 'The business name cannot be empty.').max(160).optional(),
     business_type: clamped(80).optional(),
     timezone: clamped(64).optional(),
     is_active: z.boolean().optional(),
@@ -409,7 +434,7 @@ apiRouter.get('/tenants/:tenantId/deployment-status', asyncRoute(async (req, res
   await requireTenantRole(req, id);
   const company = await getCompany(id);
   if (!isProvisioned(company)) {
-    return res.json({ provisioned: false, inCall: null, status: 'not_provisioned', message: 'This clinic has no provisioned agent. Add a Gemini API key to provision it.' });
+    return res.json({ provisioned: false, inCall: null, status: 'not_provisioned', message: 'This business has no provisioned agent. Add a Gemini API key to provision it.' });
   }
   try {
     const runtime = await getClinicAgentRuntime().status(id);
@@ -428,7 +453,7 @@ apiRouter.post('/tenants/:tenantId/end-call', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requirePlatformAdmin(req);
   const company = await getCompany(id);
-  if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent.');
+  if (!isProvisioned(company)) throw new HttpError(409, 'This business has no provisioned agent.');
   const ended = await endClinicCall(id);
   res.json({
     ok: true,
@@ -441,7 +466,7 @@ apiRouter.delete('/tenants/:tenantId/agent', asyncRoute(async (req, res) => {
   const id = tenantId(req);
   await requirePlatformAdmin(req);
   const company = await getCompany(id);
-  if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned agent to remove.');
+  if (!isProvisioned(company)) throw new HttpError(409, 'This business has no provisioned agent to remove.');
   await endClinicCall(id);
   await clearTenantProviderSecrets(id);
   await updateCompany(id, { agent_status: 'not_created' });
@@ -453,7 +478,7 @@ apiRouter.delete('/tenants/:tenantId/agent', asyncRoute(async (req, res) => {
       note: 'Agent removed; add a Gemini API key to provision it again',
     });
   }
-  res.json({ ok: true, tenant: await getCompany(id), message: 'Clinic agent removed; stored credentials were deleted. Call and appointment history stays in the clinic’s own Supabase project.' });
+  res.json({ ok: true, tenant: await getCompany(id), message: 'Voice receptionist removed; stored credentials were deleted. Call and booking history stays in the business’s own Supabase project.' });
 }));
 
 apiRouter.post('/tenants/:tenantId/voice-token', asyncRoute(async (req, res) => {
@@ -461,8 +486,8 @@ apiRouter.post('/tenants/:tenantId/voice-token', asyncRoute(async (req, res) => 
   const id = tenantId(req);
   await requireTenantRole(req, id);
   const company = await getCompany(id);
-  if (!company.is_active) throw new HttpError(409, 'This clinic is inactive.');
-  if (!isProvisioned(company)) throw new HttpError(409, 'This clinic has no provisioned voice agent.');
+  if (!company.is_active) throw new HttpError(409, 'This business is inactive.');
+  if (!isProvisioned(company)) throw new HttpError(409, 'This business has no provisioned voice agent.');
   const token = await new SignJWT({ tenantId: id, purpose: 'voice' })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -507,7 +532,7 @@ apiRouter.get('/tenants/:tenantId/calls/:callId', asyncRoute(async (req, res) =>
   try { call = await getCallDetail(db, id, callId); } catch (error) {
     throw new HttpError(502, error instanceof DatabaseAdviceError ? error.message : await databaseProblem(id));
   }
-  if (!call) throw new HttpError(404, 'That call was not found for this clinic.');
+  if (!call) throw new HttpError(404, 'That call was not found for this business.');
   res.setHeader('Cache-Control', 'no-store');
   res.json({ call });
 }));

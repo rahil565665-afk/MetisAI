@@ -1,15 +1,15 @@
 # Deploying to Cloudflare (free plan)
 
-This deploys the whole application — dashboard, API and per-clinic voice agents — as one Cloudflare Worker with Durable Objects, using Workers Builds (Cloudflare builds and deploys on every push to `main`). Nothing here needs Docker, Containers or a paid plan.
+This deploys the whole application — dashboard, API and per-business voice agents — as one Cloudflare Worker with Durable Objects, using Workers Builds (Cloudflare builds and deploys on every push to `main`). Nothing here needs Docker, Containers or a paid plan.
 
 ## 0. What you need
 
 - A **Cloudflare account** (the free Workers plan is enough).
-- Per clinic, entered in the console later and not here: a **Supabase project** of its own (the free tier is fine), a **Gemini API key** (required; create it in Google AI Studio with Live API access) and optionally a Cal.com API key and event.
+- Per business, entered in the console later and not here: a **Supabase project** of its own (the free tier is fine), a **Gemini API key** (required; create it in Google AI Studio with Live API access) and optionally a Cal.com API key and event.
 
 ## 1. Nothing to set up centrally
 
-There is no shared database. The console keeps its clinic list and each clinic's encrypted keys inside the Worker (a Durable Object on Cloudflare's free storage), and every clinic's call history and appointments go to **that clinic's own Supabase project**, which you set up per clinic in step 4.
+There is no shared database. The console keeps its business list and each business's encrypted keys inside the Worker (a Durable Object on Cloudflare's free storage), and every business's call history and bookings go to **that business's own Supabase project**, which you set up per business in step 4.
 
 ## 2. Create the Worker from this repository
 
@@ -42,18 +42,18 @@ Equivalent from a terminal: `npx wrangler secret put DASHBOARD_ADMIN_PASSCODE` (
 
 Secrets are kept across deployments. `wrangler.jsonc` only sets the non-secret `NODE_ENV=production`; do not add secrets there.
 
-**Make all four *Secret*, not *Text*.** A deploy replaces a Worker's variables with the ones in `wrangler.jsonc`, which would delete any dashboard variable of type *Text*. This repository sets `keep_vars: true` so a deploy leaves dashboard variables alone, but Secret is still the right type, because it is never shown or deleted. **Never regenerate `TENANT_CREDENTIALS_ENCRYPTION_KEY` once clinics have saved keys**: keys saved under the old value can no longer be read.
+**Make all four *Secret*, not *Text*.** A deploy replaces a Worker's variables with the ones in `wrangler.jsonc`, which would delete any dashboard variable of type *Text*. This repository sets `keep_vars: true` so a deploy leaves dashboard variables alone, but Secret is still the right type, because it is never shown or deleted. **Never regenerate `TENANT_CREDENTIALS_ENCRYPTION_KEY` once businesses have saved keys**: keys saved under the old value can no longer be read.
 
 Optional plain-text variables (Settings → Variables, type **Text**), only if Google changes the Live API: `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`) and `GEMINI_VOICE_NAME` (default `Charon`). Invalid values are ignored with the default used instead.
 
-## 4. Sign in and create a clinic
+## 4. Sign in and create a business
 
-1. In Supabase, create a project for the clinic. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console will not store it. A project that already has tables from an earlier version works as it is: the Worker repairs the old link when it first needs to.
+1. In Supabase, create a project for the business. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console will not store it. A project that already has tables from an earlier version works as it is: the Worker repairs the old link when it first needs to.
 2. Open the Worker URL and sign in with `DASHBOARD_ADMIN_PASSCODE`.
-3. **Add clinic agent**: only the clinic's name is required. Optionally add the greeting, a PDF as the knowledge base (services, prices, hours, policies; its text is read in your browser and the first 60,000 characters are used), the clinic's Supabase URL and secret key, and its Gemini API key. For scheduling, add the Cal.com API key and either the event's link (for example `https://cal.com/your-name/30min`) or its numeric event type ID. Nothing here can stop the clinic being created: each value is saved and checked, and anything that is wrong is listed after the clinic appears, marked **Needs attention** under Integrations, so you can correct it there.
-4. Open the clinic and press **Start browser test**, allow the microphone, and talk. The receptionist greets you first. Use headphones — with speakers, the microphone can pick up the assistant and make it interrupt itself.
-5. Under the call controls the page shows two lines: whether **booking is ready** (Cal.com accepted the key and found the event; if not, it says why and the receptionist will only take a message) and whether **the call is being saved** to the clinic's call history. Both are checked when the call starts, so a problem is visible before you spend time talking.
-6. To make a booking, give your name, a phone number and your email, spelled letter by letter. The receptionist reads your name, the time, the phone number digit by digit and the email letter by letter, and asks if all of it is correct. Only after you say yes does a prompt appear in the browser (**Approve action**); the booking is made when you approve it. Afterwards, **Call activity → Details** shows what the receptionist did and the whole conversation.
+3. Choose **Add business receptionist**, enter a business name, and select Dental, Salon/Spa, Medical, Legal, Restaurant, Home services, Fitness, or General. Only the name is required. Each template supplies editable starter instructions; under **Reception setup**, tailor its persona, tone, services, hours, safety rules, FAQs, and enabled actions. See [Create your first receptionist](first-receptionist.md) for the practical setup checklist.
+4. Connect the business's Supabase URL and secret key if you want call history to be saved, and add its Gemini API key to enable the voice test. Booking is optional: to enable it, turn on **Booking** in Reception setup and configure the Cal.com API key plus either an event link (for example `https://cal.com/your-name/30min`) or its numeric event type ID. A missing or rejected provider never blocks business creation; the console reports problems under Integrations.
+5. Review the **Take messages** and **Hand off to staff** switches. Taking a message saves a call-history note when Supabase is connected; it does not call staff. Handoff is a logged event only—the current browser tester cannot transfer a phone call. A disabled action is not offered to the assistant.
+6. Open the business, press **Start browser test**, allow the microphone, and talk. Use invented details and headphones. The call page reports whether booking is ready and whether call history is being saved; if booking is off or unavailable, the assistant must not claim that it completed a booking. If booking is enabled and ready, the receptionist reads the exact details back; after a clear yes, the browser asks for **Approve action** before it calls Cal.com. Afterwards, **Call activity → Details** shows the outcome and conversation.
 
 ## What the free plan covers
 
@@ -70,12 +70,12 @@ Roughly 3,000 call-minutes a day by request count — shared with dashboard use.
 
 ## Operating notes
 
-- **Changing a provider key** — save it in the clinic's integrations. A call in progress is ended; the next test uses the new key.
-- **Remove clinic agent** deletes the clinic's stored provider keys (including its Supabase credentials) and marks it unprovisioned; add a Gemini key again to re-provision. The call history in the clinic's own Supabase project is untouched.
+- **Changing a provider key** — save it in the business's integrations. A call in progress is ended; the next test uses the new key.
+- **Remove business agent** deletes the business's stored provider keys (including its Supabase credentials) and marks it unprovisioned; add a Gemini key again to re-provision. The call history in the business's own Supabase project is untouched.
 - **Locked out?** After 8 wrong passcodes an address is blocked for up to 15 minutes, even if the next attempt is correct. Changing the `DASHBOARD_ADMIN_PASSCODE` secret takes effect immediately for new sign-ins.
-- **Rotating `DASHBOARD_SESSION_SECRET`** signs everyone out and rotates every clinic's voice key; no other action is needed.
-- **Keeping your clinics safe.** Clinics live in the Worker's Durable Object storage, which survives deploys and restarts. For safety, **Download backup** (Overview page) saves a file with every clinic's settings and its keys *encrypted*; the file is only useful with the same `TENANT_CREDENTIALS_ENCRYPTION_KEY`, so keep both. On a Worker with no clinics, **Restore from backup** puts them back. Restoring only adds: it never overwrites or removes a clinic that already exists.
-- **If `TENANT_CREDENTIALS_ENCRYPTION_KEY` was changed or lost**, clinics are kept, but their saved keys can no longer be read. Each clinic's integrations are marked *Needs attention* with the reason; enter the Gemini, Cal.com and Supabase keys again and the clinic works again. Nothing else needs re-creating.
+- **Rotating `DASHBOARD_SESSION_SECRET`** signs everyone out and rotates every business's voice key; no other action is needed.
+- **Keeping your businesses safe.** Businesses live in the Worker's Durable Object storage, which survives deploys and restarts. For safety, **Download backup** (Overview page) saves a file with every business's settings and its keys *encrypted*; the file is only useful with the same `TENANT_CREDENTIALS_ENCRYPTION_KEY`, so keep both. On a Worker with no businesses, **Restore from backup** puts them back. Restoring only adds: it never overwrites or removes a business that already exists.
+- **If `TENANT_CREDENTIALS_ENCRYPTION_KEY` was changed or lost**, businesses are kept, but their saved keys can no longer be read. Each business's integrations are marked *Needs attention* with the reason; enter the Gemini, Cal.com and Supabase keys again and the business works again. Nothing else needs re-creating.
 - **Logs**: Worker → *Observability* → Logs. Voice calls log only status codes and error classes; they never log audio, transcripts, keys or provider error text.
 - **Deploys during a call** can drop it. The browser shows the call as ended; start a new test.
 
@@ -85,30 +85,30 @@ Roughly 3,000 call-minutes a day by request count — shared with dashboard use.
 | --- | --- |
 | Build fails with a name mismatch | The Worker's name in the dashboard differs from `name` in `wrangler.jsonc` (currently `metisai`). Rename the config value to match, since a Worker cannot be renamed. |
 | Sign-in says the passcode is invalid | `DASHBOARD_ADMIN_PASSCODE` is not set as a Worker secret, or was set as a *build* variable. |
-| Sign-in or saving a clinic returns "server is not configured" | One of the four secrets is missing or malformed (`APP_PUBLIC_URL` with a path, keys not 64 hex characters). |
+| Sign-in or saving a business returns "server is not configured" | One of the four secrets is missing or malformed (`APP_PUBLIC_URL` with a path, keys not 64 hex characters). |
 | Every state-changing request returns 403 | `APP_PUBLIC_URL` does not exactly match the origin you are browsing. |
-| The voice test shows "Add a Gemini API key" | The clinic has no Gemini key saved, or the key was removed. |
+| The voice test shows "Add a Gemini API key" | The business has no Gemini key saved, or the key was removed. |
 | The voice test says the Gemini service refused the connection | The key is invalid, lacks Live API access, or the configured model name is not available to it. Check the key in Google AI Studio, then `GEMINI_LIVE_MODEL`. |
-| The voice test says a test is already running | Another browser tab (or a call that has not timed out) is using this clinic. Close the other tab, or press **End call in progress** in the clinic's *Agent status* panel; an abandoned call also ends by itself after 3 minutes of silence. |
+| The voice test says a test is already running | Another browser tab (or a call that has not timed out) is using this business. Close the other tab, or press **End call in progress** in the business's *Agent status* panel; an abandoned call also ends by itself after 3 minutes of silence. |
 | Some pages return Cloudflare error 1102 ("exceeded resource limits") | The Free plan's 10 ms CPU limit per request was hit. Retry once; if it persists, upgrade to Workers Paid. |
 | Everything returns an error late in the day | The daily Free-plan request allowance is used up; it resets at 00:00 UTC. |
-| A clinic's keys can no longer be read after a deploy | `TENANT_CREDENTIALS_ENCRYPTION_KEY` was changed or lost. The clinic is kept; re-enter its keys under Integrations (or restore a backup made with the old key). |
+| A business's keys can no longer be read after a deploy | `TENANT_CREDENTIALS_ENCRYPTION_KEY` was changed or lost. The business is kept; re-enter its keys under Integrations (or restore a backup made with the old key). |
 | The page says *Booking unavailable* before a call | Cal.com rejected the API key, could not find the event, or is not set up. The reason is shown; fix it under **Integrations → Cal.com scheduling**. |
-| The page says *Call history: not saved* | The reason is shown: usually the clinic has no Supabase database connected, its tables are missing (run `supabase/clinic-schema.sql`), or its secret key was rejected. |
+| The page says *Call history: not saved* | The reason is shown: usually the business has no Supabase database connected, its tables are missing (run `supabase/clinic-schema.sql`), or its secret key was rejected. |
 | The receptionist says it cannot book | Check the *Booking* line on the page. If booking is ready, the receptionist's last attempt and Cal.com's reason (for example a time that is no longer free, or an invalid phone number) are in **Call activity → Details**. |
-| The clinic was created but Supabase shows *Needs attention*: missing its tables | `supabase/clinic-schema.sql` has not been run in that clinic's Supabase project. Run it, then press **Save connection** again. |
-| The clinic was created but Supabase shows *Needs attention*: link from an earlier version | The project's old foreign key could not be repaired automatically (usually a restricted key). Run `supabase/clinic-schema.sql` in that project's SQL Editor, then press **Save connection** again. |
+| The business was created but Supabase shows *Needs attention*: missing its tables | `supabase/clinic-schema.sql` has not been run in that business's Supabase project. Run it, then press **Save connection** again. |
+| The business was created but Supabase shows *Needs attention*: link from an earlier version | The project's old foreign key could not be repaired automatically (usually a restricted key). Run `supabase/clinic-schema.sql` in that project's SQL Editor, then press **Save connection** again. |
 | Supabase shows *Needs attention*: rejected the secret key | The wrong key was pasted (publishable / anon, or from another project). Use the **secret** key shown under *Project Settings → API Keys*. |
 | A PDF upload says no text could be read | The PDF is a scan or a set of pictures. Export a PDF with selectable text (for example from Word or Google Docs), or run OCR on it first. Password-protected PDFs must be unlocked first. |
 | Cal.com says the event was not found | The link or event type ID does not belong to the account that owns the API key. |
-| Call activity says the database is not connected | The clinic's Supabase URL or key stopped working. Re-enter it under **Integrations → Clinic Supabase database**. |
+| Call activity says the database is not connected | The business's Supabase URL or key stopped working. Re-enter it under **Integrations → Business Supabase database**. |
 
 ## Before using it with real callers
 
 This repository has been verified by typecheck, unit tests, and an end-to-end run in the local Workers runtime and Chrome (with a fake microphone), against stand-ins for Gemini, Cal.com and Supabase. Three things can only be confirmed on your own accounts:
 
 1. **A real Gemini Live call** — model access, voice quality, and speaker echo. Make a test call right after deploying.
-2. **Real Cal.com bookings** — confirm availability, booking, rescheduling and cancellation against a test event type, using fake patient details.
+2. **Real Cal.com bookings** — confirm availability, booking, rescheduling and cancellation against a test event type, using fake caller details.
 3. **Dashboard CPU time on the free plan** — only Cloudflare enforces it, so use the console for a few minutes after deploying and watch for error 1102.
 
-If an earlier version of this project exposed any provider or database keys (for example in a pasted file or chat), rotate them before going live: each clinic's Supabase secret key first, then Gemini.
+If an earlier version of this project exposed any provider or database keys (for example in a pasted file or chat), rotate them before going live: each business's Supabase secret key first, then Gemini.

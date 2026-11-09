@@ -29,7 +29,7 @@ const EMAIL_HELP = 'ask the caller to spell it slowly, letter by letter, saying 
  * ("jacob at gmail dot com") or drop the "@", so those spoken forms are accepted, and anything that is still
  * not a plausible address is refused with advice the model can act on.
  */
-export function normalizeSpokenEmail(raw: string, label = 'patient_email'): string {
+export function normalizeSpokenEmail(raw: string, label = 'email address'): string {
   let text = raw.trim().toLowerCase();
   if (!text.includes('@')) text = text.replace(/\s+at\s+/, '@');
   text = text
@@ -53,7 +53,7 @@ export function normalizeSpokenEmail(raw: string, label = 'patient_email'): stri
   return text;
 }
 
-export function cleanEmail(value: unknown, label = 'patient_email'): string {
+export function cleanEmail(value: unknown, label = 'email address'): string {
   return normalizeSpokenEmail(cleanText(value, label, 300), label);
 }
 
@@ -80,7 +80,7 @@ export interface CleanPhone {
 }
 
 /** A phone number from speech: seven to fifteen digits. A bare US number is only completed for US time zones. */
-export function cleanPhone(value: unknown, timeZone: string, label = 'patient_phone'): CleanPhone {
+export function cleanPhone(value: unknown, timeZone: string, label = 'phone number'): CleanPhone {
   const text = cleanText(value, label, 40);
   const plus = text.trim().startsWith('+');
   const digits = text.replace(/\D/g, '');
@@ -96,7 +96,7 @@ export function cleanPhone(value: unknown, timeZone: string, label = 'patient_ph
 }
 
 /** A person's name: at least two letters, no digits or symbols that a name never has. */
-export function cleanPersonName(value: unknown, label = 'patient_name'): string {
+export function cleanPersonName(value: unknown, label = 'caller name'): string {
   const name = cleanText(value, label, 120).replace(/\s+/g, ' ');
   if (!/^[\p{L}][\p{L}\p{M}'’. -]*$/u.test(name) || (name.match(/\p{L}/gu) ?? []).length < 2) {
     throw new ToolError(`${label} must be the caller's real name. Ask for their full name.`);

@@ -83,7 +83,7 @@ const dump = async (port) => (await fetch(`http://127.0.0.1:${port}/__dump`)).js
   await page.locator('form button').first().click();
   await page.locator('.empty-restore').waitFor({ timeout: 15000 });
   check('with no clinics, the page offers to restore a backup', /Restore from backup/.test(await page.locator('.empty-restore').innerText()));
-  await page.getByLabel('Clinic backup file').setInputFiles(backupFile);
+  await page.getByLabel('Business backup file').setInputFiles(backupFile);
   await page.locator('.tenant-switcher select').waitFor({ timeout: 15000 });
   const options = await page.locator('.tenant-switcher select option').allInnerTexts();
   check('restoring brings both clinics back', options.includes('Persist One') && options.includes('Persist Two'), JSON.stringify(options));

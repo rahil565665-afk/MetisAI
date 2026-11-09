@@ -14,10 +14,10 @@ export function configureRegistry(next: RegistryApi | undefined): void {
 
 function registry(): RegistryApi {
   if (configured) return configured;
-  // Only an explicit local development run may keep clinics in memory; anywhere else a missing
+  // Only an explicit local development run may keep businesses in memory; anywhere else a missing
   // registry must fail loudly instead of quietly losing data.
   if (process.env.NODE_ENV === 'development') return (developmentFallback ??= new RegistryCore(memoryStore()));
-  throw new Error('The clinic registry is not configured.');
+  throw new Error('The business registry is not configured.');
 }
 
 export async function listCompanies(): Promise<Company[]> {
@@ -26,19 +26,19 @@ export async function listCompanies(): Promise<Company[]> {
 
 export async function getCompany(id: string): Promise<Company> {
   const company = await registry().getCompany(id);
-  if (!company) throw new HttpError(404, 'That clinic was not found.');
+  if (!company) throw new HttpError(404, 'That business was not found.');
   return company;
 }
 
 export async function createCompany(input: NewCompany): Promise<Company> {
   const result = await registry().createCompany(input);
-  if (!result.ok) throw new HttpError(409, 'A clinic with that service slug already exists. Choose a different slug.');
+  if (!result.ok) throw new HttpError(409, 'A business with that service slug already exists. Choose a different slug.');
   return result.company;
 }
 
 export async function updateCompany(id: string, changes: CompanyChanges): Promise<Company> {
   const company = await registry().updateCompany(id, changes);
-  if (!company) throw new HttpError(404, 'That clinic was not found.');
+  if (!company) throw new HttpError(404, 'That business was not found.');
   return company;
 }
 

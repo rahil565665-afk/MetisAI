@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Headphones, LayoutDashboard, LogOut, Mic2, Plus, Settings2, ShieldCheck, SlidersHorizontal, Stethoscope, X } from 'lucide-react';
+import { Activity, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Headphones, LayoutDashboard, LogOut, Mic2, Plus, Settings2, ShieldCheck, SlidersHorizontal, Building2, X } from 'lucide-react';
 import { api, type CallDetail, type CallRow, type NewTenantInput, type UsageSummary } from './api.js';
 import * as React from 'react';
 import type { Company, IntegrationStatus, SessionUser } from './types.js';
 import { KnowledgeUpload, type KnowledgeValue } from './KnowledgeUpload.js';
 import { BackupPanel } from './BackupPanel.js';
+import { BUSINESS_TEMPLATES, BUSINESS_TEMPLATE_IDS, defaultActions, defaultReceptionistSettings, type BusinessTemplateId } from '../shared/businessTemplates.js';
 
 const VoiceTester = React.lazy(() => import('./VoiceTester.js').then((module) => ({ default: module.VoiceTester })));
 
@@ -95,18 +96,18 @@ export function App() {
     setPage(warnings.length ? 'integrations' : 'clinic');
   }
 
-  const pageTitle: Record<Page, string> = { overview: 'Clinic overview', voice: 'Voice test lab', clinic: 'Reception setup', integrations: 'Provider connections', calls: 'Call activity' };
+  const pageTitle: Record<Page, string> = { overview: 'Business overview', voice: 'Voice test lab', clinic: 'Reception setup', integrations: 'Provider connections', calls: 'Call activity' };
 
   if (loading) return <div className="loading-screen"><div className="spinner" /><span>Loading reception console</span></div>;
 
-  if (!user) return <main className="login-wrap"><div className="login-card"><div className="brand-symbol"><Stethoscope size={25} /></div><div className="eyebrow">DENTDESK · RECEPTION OPERATIONS</div><h1>A calmer front desk,<br /><em>ready to listen.</em></h1><p>Enter your workspace passcode to configure a clinic, test a voice session, and review call activity.</p>{error && <div className="alert error">{error}</div>}<form onSubmit={(event) => void signIn(event)}><label className="form-field"><span>Workspace passcode</span><input type="password" autoComplete="current-password" value={passcode} onChange={(event) => setPasscode(event.target.value)} required /></label><button className="button primary wide">Continue <ChevronRight size={17} /></button></form><div className="login-note"><ShieldCheck size={15} /> Secure passcode sign-in · Clinic access is role-controlled</div></div><div className="login-aside"><span className="mini-label">RECEPTION CONSOLE</span><div className="signal-wave"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div><div className="aside-title">Every call starts<br />with listening.</div><div className="aside-copy">Appointments, common questions, and the moment a person needs a person.</div></div></main>;
+  if (!user) return <main className="login-wrap"><div className="login-card"><div className="brand-symbol"><Building2 size={25} /></div><div className="eyebrow">METIS AI · RECEPTION OPERATIONS</div><h1>A calmer front desk,<br /><em>ready to listen.</em></h1><p>Enter your workspace passcode to configure a business receptionist, test a voice session, and review call activity.</p>{error && <div className="alert error">{error}</div>}<form onSubmit={(event) => void signIn(event)}><label className="form-field"><span>Workspace passcode</span><input type="password" autoComplete="current-password" value={passcode} onChange={(event) => setPasscode(event.target.value)} required /></label><button className="button primary wide">Continue <ChevronRight size={17} /></button></form><div className="login-note"><ShieldCheck size={15} /> Secure passcode sign-in · Business access is role-controlled</div></div><div className="login-aside"><span className="mini-label">RECEPTION CONSOLE</span><div className="signal-wave"><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /></div><div className="aside-title">Every call starts<br />with listening.</div><div className="aside-copy">Bookings, common questions, and the moment a person needs a person.</div></div></main>;
 
-  if (!active && !user.isPlatformAdmin) return <main className="login-wrap"><div className="login-card"><div className="brand-symbol"><Stethoscope size={25} /></div><div className="eyebrow">ACCOUNT READY</div><h1>Clinic access<br /><em>is not assigned.</em></h1><p>Your account is signed in, but no clinic has been assigned. Ask your platform administrator to add your account to a clinic.</p><button className="button secondary" onClick={() => void signOut()}><LogOut size={16} /> Sign out</button></div></main>;
+  if (!active && !user.isPlatformAdmin) return <main className="login-wrap"><div className="login-card"><div className="brand-symbol"><Building2 size={25} /></div><div className="eyebrow">ACCOUNT READY</div><h1>Business access<br /><em>is not assigned.</em></h1><p>Your account is signed in, but no business has been assigned. Ask your platform administrator to add your account to a business.</p><button className="button secondary" onClick={() => void signOut()}><LogOut size={16} /> Sign out</button></div></main>;
 
   const navigation: Array<{ id: Page; label: string; icon: typeof LayoutDashboard }> = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     { id: 'voice', label: 'Voice test', icon: Headphones },
-    { id: 'clinic', label: 'Clinic setup', icon: Settings2 },
+    { id: 'clinic', label: 'Reception setup', icon: Settings2 },
     { id: 'integrations', label: 'Integrations', icon: SlidersHorizontal },
     { id: 'calls', label: 'Call activity', icon: Activity },
   ];
@@ -114,19 +115,19 @@ export function App() {
 
   return <div className="app-shell">
     <aside className={`sidebar ${navOpen ? '' : 'sidebar-collapsed'}`}>
-      <div className="sidebar-brand"><div className="brand-symbol small"><Stethoscope size={18} /></div>{navOpen && <div><strong>dentdesk</strong><span>RECEPTION CONSOLE</span></div>}<button className="icon-button nav-toggle" aria-label="Collapse navigation" onClick={() => setNavOpen(!navOpen)}><ChevronDown size={16} /></button></div>
+      <div className="sidebar-brand"><div className="brand-symbol small"><Building2 size={18} /></div>{navOpen && <div><strong>Metis AI</strong><span>RECEPTION CONSOLE</span></div>}<button className="icon-button nav-toggle" aria-label="Collapse navigation" onClick={() => setNavOpen(!navOpen)}><ChevronDown size={16} /></button></div>
       {navOpen && <div className="sidebar-section-label">WORKSPACE</div>}
       <div className="nav-list">{navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)} title={item.label}><item.icon size={17} />{navOpen && <span>{item.label}</span>}{navOpen && item.id === 'voice' && <span className="nav-live">TEST</span>}</button>)}</div>
-      <div className="sidebar-bottom">{navOpen && <div className="security-card"><div className="security-top"><span className="status-dot mint" />PRIVATE WORKSPACE</div><p>Clinic settings and provider keys are accessible only to authorized users.</p></div>}<button className="user-row" onClick={() => void signOut()}><div className="avatar">{shortName(user.name || user.email)}</div>{navOpen && <div className="user-meta"><strong>{user.name || user.email}</strong><span>{user.isPlatformAdmin ? 'Platform admin' : 'Clinic member'}</span></div>}<LogOut size={15} className="logout-icon" /></button></div>
+      <div className="sidebar-bottom">{navOpen && <div className="security-card"><div className="security-top"><span className="status-dot mint" />PRIVATE WORKSPACE</div><p>Business settings and provider keys are accessible only to authorized users.</p></div>}<button className="user-row" onClick={() => void signOut()}><div className="avatar">{shortName(user.name || user.email)}</div>{navOpen && <div className="user-meta"><strong>{user.name || user.email}</strong><span>{user.isPlatformAdmin ? 'Platform admin' : 'Business member'}</span></div>}<LogOut size={15} className="logout-icon" /></button></div>
     </aside>
     <main className="main-panel">
       <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{pageTitle[page]}</strong></div><div className="topbar-right"><span className="topbar-status"><i className="status-dot mint" /> CONSOLE READY</span><button className="help-button" title="Help"><CircleHelp size={16} /></button></div></header>
       <div className="content-scroll">
-        <div className="page-heading"><div><div className="eyebrow">{page === 'voice' ? 'BROWSER AUDIO · NO PHONE LINE' : 'MULTI-TENANT RECEPTION'}</div><h1>{pageTitle[page]}</h1><p>{page === 'overview' ? 'A clear view of each clinic’s service configuration and runtime readiness.' : page === 'voice' ? 'Test the receptionist with your microphone before connecting a phone line.' : page === 'clinic' ? 'Tune the greeting, clinic details, and caller guidance.' : page === 'integrations' ? 'Connect provider accounts without exposing credentials to the browser.' : 'Recent calls, handoff requests, and assistant activity.'}</p></div><div className="heading-actions">{user.isPlatformAdmin && <button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button>}</div></div>
+        <div className="page-heading"><div><div className="eyebrow">{page === 'voice' ? 'BROWSER AUDIO · NO PHONE LINE' : 'MULTI-BUSINESS RECEPTION'}</div><h1>{pageTitle[page]}</h1><p>{page === 'overview' ? 'A clear view of each business’s receptionist configuration and readiness.' : page === 'voice' ? 'Test the receptionist with your microphone before connecting a phone line.' : page === 'clinic' ? 'Tune the greeting, business details, and caller guidance.' : page === 'integrations' ? 'Connect provider accounts without exposing credentials to the browser.' : 'Recent calls, handoff requests, and assistant activity.'}</p></div><div className="heading-actions">{user.isPlatformAdmin && <button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add business receptionist</button>}</div></div>
         {error && <div className="alert error inline-alert">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
         {created && <div className={`alert inline-alert created-banner ${created.warnings.length ? 'warn' : ''}`}><div><strong>{created.name} was created.</strong>{created.warnings.length > 0 && <> These still need attention (you can fix each one under Integrations):<ul>{created.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></>}</div><button aria-label="Dismiss" onClick={() => setCreated(null)}><X size={14} /></button></div>}
-        {active && <div className="tenant-context"><div className="tenant-monogram">{shortName(active.name)}</div><div className="tenant-context-name"><span>ACTIVE CLINIC</span><strong>{active.name}</strong></div><div className="tenant-switcher"><select aria-label="Choose active clinic" value={active.id} onChange={(event) => setActiveId(event.target.value)}>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select><ChevronDown size={14} /></div><span className={`pill ${active.is_active ? 'active-pill' : 'paused-pill'}`}><i />{active.is_active ? 'ACTIVE' : 'PAUSED'}</span></div>}
-        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Stethoscope size={22} /></div><h2>Create your first clinic agent</h2><p>Each clinic gets its own voice agent, running on Cloudflare and answering through Gemini Live, and keeps its call history in its own Supabase project.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add clinic agent</button><div className="empty-restore"><span>Had clinics before? Bring them back from a backup file.</span><BackupPanel download={false} onRestored={restored} /></div></div>}
+        {active && <div className="tenant-context"><div className="tenant-monogram">{shortName(active.name)}</div><div className="tenant-context-name"><span>ACTIVE BUSINESS</span><strong>{active.name}</strong></div><div className="tenant-switcher"><select aria-label="Choose active business" value={active.id} onChange={(event) => setActiveId(event.target.value)}>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select><ChevronDown size={14} /></div><span className={`pill ${active.is_active ? 'active-pill' : 'paused-pill'}`}><i />{active.is_active ? 'ACTIVE' : 'PAUSED'}</span></div>}
+        {!active && user.isPlatformAdmin && <div className="empty-state"><div className="empty-icon"><Building2 size={22} /></div><h2>Create your first business receptionist</h2><p>Each business gets its own voice receptionist, powered by Gemini Live, and keeps call history and bookings in its own Supabase project.</p><button className="button primary" onClick={() => setShowCreate(true)}><Plus size={16} /> Add business receptionist</button><div className="empty-restore"><span>Have existing businesses? Restore them from a backup file.</span><BackupPanel download={false} onRestored={restored} /></div></div>}
         {active && page === 'overview' && <Overview tenant={active as ExtendedCompany} go={setPage} canManage={user.isPlatformAdmin} onUpdate={(next) => setTenants((items) => items.map((item) => item.id === next.id ? next : item))} />}
         {active && page === 'overview' && user.isPlatformAdmin && <section className="panel backup-section"><div className="eyebrow">SAFEKEEPING</div><BackupPanel onRestored={restored} /></section>}
         {active && page === 'voice' && voiceTenant && <React.Suspense fallback={<div className="loading-screen"><div className="spinner" /><span>Loading voice test tools</span></div>}><VoiceTester tenant={voiceTenant} /></React.Suspense>}
@@ -183,7 +184,7 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
     void api.usage(tenant.id).then((summary) => {
       if (current) setUsage(summary);
     }).catch((cause) => {
-      if (current) setUsageError(cause instanceof Error ? cause.message : 'Could not load clinic usage.');
+      if (current) setUsageError(cause instanceof Error ? cause.message : 'Could not load business usage.');
     }).finally(() => {
       if (current) setUsageLoading(false);
     });
@@ -200,21 +201,21 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
     } finally { setLifecycleBusy(false); }
   }
   async function removeAgent() {
-    if (!window.confirm(`Remove the voice agent for ${tenant.name}? This removes the clinic agent provisioning and its agent-specific configuration, but preserves the clinic profile and saved call and appointment history.`)) return;
+    if (!window.confirm(`Remove the voice receptionist for ${tenant.name}? This removes its provisioning and agent-specific configuration, but preserves the business profile and saved call and booking history.`)) return;
     setLifecycleBusy(true); setLifecycleNotice('');
     try {
       const result = await api.deleteAgent(tenant.id);
       onUpdate(result.tenant);
       setDeployment({ provisioned: false, inCall: null, status: 'Not provisioned', error: '' });
-      setLifecycleNotice('Clinic agent removed. The clinic profile and saved call and appointment history are preserved.');
+      setLifecycleNotice('Voice receptionist removed. The business profile and saved call and booking history are preserved.');
     } catch (cause) {
-      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not remove the clinic agent.');
+      setLifecycleNotice(cause instanceof Error ? cause.message : 'Could not remove the voice receptionist.');
     } finally { setLifecycleBusy(false); }
   }
   const checks = [
     { id: 'gemini', label: 'Gemini Live', status: integrations.gemini },
     { id: 'calcom', label: 'Cal.com', status: integrations.calcom },
-    { id: 'supabase', label: 'Clinic Supabase database', status: integrations.supabase },
+    { id: 'supabase', label: 'Business Supabase database', status: integrations.supabase },
   ].map((item) => ({ ...item, state: connectionState(item.status), problem: item.status?.problem }));
   const ready = checks.filter((item) => item.state === 'ok').length;
   const yesNo = (value: boolean | null) => value === null ? 'Not reported' : value ? 'Yes' : 'No';
@@ -234,30 +235,74 @@ function Overview({ tenant, go, canManage, onUpdate }: { tenant: ExtendedCompany
       ['Handoffs', usage.escalationCount.toLocaleString()],
       ['Talk time', talkTime(usage.talkSeconds)],
     ].map(([label, value]) => <div className="usage-stat" key={label}><strong className="usage-stat-value">{value}</strong><span className="usage-stat-label">{label}</span></div>)}</div> : null}</section>
-    <section className="panel agent-status-panel"><div className="panel-head"><div><div className="eyebrow">CLOUDFLARE VOICE AGENT</div><h2>Agent status</h2></div><button className="button secondary" onClick={() => void refreshDeployment()} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh status'}</button></div><div className="readiness-list"><div className="readiness-row"><span className="provider-name">Agent provisioned</span><span className={`readiness-state ${deployment.provisioned ? 'ok' : ''}`}><i />{yesNo(deployment.provisioned)}</span></div><div className="readiness-row"><span className="provider-name">Call in progress</span><span className={`readiness-state ${deployment.inCall ? 'ok' : ''}`}><i />{yesNo(deployment.inCall)}</span></div><div className="readiness-row"><span className="provider-name">Agent state</span><span className="readiness-state">{agentStateLabel(deployment.status)}</span></div></div><div className="privacy-note"><ShieldCheck size={16} /><span>The agent only runs while a voice test is open and uses nothing between calls. Starting a test opens one WebSocket; there is no background pinger.</span></div>{lifecycleNotice && <div className="alert">{lifecycleNotice}</div>}{canManage && <div className="modal-actions"><button className="button secondary" onClick={() => void endCall()} disabled={lifecycleBusy}>{lifecycleBusy ? 'Working…' : 'End call in progress'}</button><button className="button secondary" onClick={() => void removeAgent()} disabled={lifecycleBusy}>Remove clinic agent</button></div>}{deployment.provisioned === false && <div className="alert">No voice agent is provisioned for this business. Add a Gemini API key to provision it.</div>}{deployment.error && <div className="alert error">Voice agent status: {deployment.error}</div>}</section>
-    <div className="section-title-row"><div><div className="eyebrow">LATEST ACTIVITY</div><h2>Recent calls</h2></div><button className="text-link" onClick={() => go('calls')}>View call history <ChevronRight size={15} /></button></div><CallTable rows={calls.slice(0, 5)} tenantId={tenant.id} />{!calls.length && <div className="panel empty-activity"><CalendarDays size={20} /><span>{databaseConnected === false ? (databaseProblem || 'This clinic’s Supabase database is not connected, so calls are not being saved.') : 'No calls recorded yet. Start a browser voice test to see activity here.'}</span></div>}</>;
+    <section className="panel agent-status-panel"><div className="panel-head"><div><div className="eyebrow">CLOUDFLARE VOICE AGENT</div><h2>Agent status</h2></div><button className="button secondary" onClick={() => void refreshDeployment()} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh status'}</button></div><div className="readiness-list"><div className="readiness-row"><span className="provider-name">Agent provisioned</span><span className={`readiness-state ${deployment.provisioned ? 'ok' : ''}`}><i />{yesNo(deployment.provisioned)}</span></div><div className="readiness-row"><span className="provider-name">Call in progress</span><span className={`readiness-state ${deployment.inCall ? 'ok' : ''}`}><i />{yesNo(deployment.inCall)}</span></div><div className="readiness-row"><span className="provider-name">Agent state</span><span className="readiness-state">{agentStateLabel(deployment.status)}</span></div></div><div className="privacy-note"><ShieldCheck size={16} /><span>The agent only runs while a voice test is open and uses nothing between calls. Starting a test opens one WebSocket; there is no background pinger.</span></div>{lifecycleNotice && <div className="alert">{lifecycleNotice}</div>}{canManage && <div className="modal-actions"><button className="button secondary" onClick={() => void endCall()} disabled={lifecycleBusy}>{lifecycleBusy ? 'Working…' : 'End call in progress'}</button><button className="button secondary" onClick={() => void removeAgent()} disabled={lifecycleBusy}>Remove voice receptionist</button></div>}{deployment.provisioned === false && <div className="alert">No voice agent is provisioned for this business. Add a Gemini API key to provision it.</div>}{deployment.error && <div className="alert error">Voice agent status: {deployment.error}</div>}</section>
+    <div className="section-title-row"><div><div className="eyebrow">LATEST ACTIVITY</div><h2>Recent calls</h2></div><button className="text-link" onClick={() => go('calls')}>View call history <ChevronRight size={15} /></button></div><CallTable rows={calls.slice(0, 5)} tenantId={tenant.id} />{!calls.length && <div className="panel empty-activity"><CalendarDays size={20} /><span>{databaseConnected === false ? (databaseProblem || 'This business’s Supabase database is not connected, so calls are not being saved.') : 'No calls recorded yet. Start a browser voice test to see activity here.'}</span></div>}</>;
 }
 
 function ClinicSetup({ tenant, onUpdate }: { tenant: Company; onUpdate: (next: Company) => void }) {
-  const config = tenant.receptionist_config as Company['receptionist_config'] & { knowledge_base?: string };
-  const [greeting, setGreeting] = useState(config?.greeting || 'Thank you for calling. How can I help you today?');
-  const knowledgeOf = (source: typeof config): KnowledgeValue => ({ text: source?.knowledge_base || '', file: source?.knowledge_base_file ?? null });
+  const templateDefaults = defaultReceptionistSettings(tenant.business_type);
+  const config = tenant.receptionist_config;
+  const knowledgeOf = (source: Company['receptionist_config']): KnowledgeValue => ({ text: source.knowledge_base || '', file: source.knowledge_base_file ?? null });
+  const actionsOf = (source: Company['receptionist_config']) => ({
+    booking: source.enabled_actions?.booking ?? true,
+    take_messages: source.enabled_actions?.take_messages ?? true,
+    hand_off: source.enabled_actions?.hand_off ?? source.transfer_enabled ?? true,
+  });
+  const faqText = (list: Array<{ question: string; answer: string }>) => list.map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n');
+  const [greeting, setGreeting] = useState(config.greeting || templateDefaults.greeting);
+  const [personaName, setPersonaName] = useState(config.persona_name || templateDefaults.persona_name);
+  const [tone, setTone] = useState(config.tone || templateDefaults.tone);
+  const [services, setServices] = useState((config.services ?? templateDefaults.services).join('\n'));
+  const [openingHours, setOpeningHours] = useState(config.opening_hours || templateDefaults.opening_hours);
+  const [safetyRules, setSafetyRules] = useState(config.safety_rules || templateDefaults.safety_rules);
+  const [bookingLanguage, setBookingLanguage] = useState(config.booking_language || templateDefaults.booking_language);
   const [knowledge, setKnowledge] = useState<KnowledgeValue>(knowledgeOf(config));
-  const [faqs, setFaqs] = useState((config?.faqs ?? []).map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n'));
+  const [faqs, setFaqs] = useState(faqText(config.faqs ?? templateDefaults.faqs));
+  const [actions, setActions] = useState(actionsOf(config));
   const [timezone, setTimezone] = useState(tenant.timezone);
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
-  useEffect(() => { const nextConfig = tenant.receptionist_config as typeof config; setGreeting(nextConfig?.greeting || 'Thank you for calling. How can I help you today?'); setKnowledge(knowledgeOf(nextConfig)); setTimezone(tenant.timezone); setFaqs((nextConfig?.faqs ?? []).map((faq) => `${faq.question}\n${faq.answer}`).join('\n\n')); }, [tenant.id]);
+  useEffect(() => {
+    const nextConfig = tenant.receptionist_config;
+    const defaults = defaultReceptionistSettings(tenant.business_type);
+    setGreeting(nextConfig.greeting || defaults.greeting); setPersonaName(nextConfig.persona_name || defaults.persona_name); setTone(nextConfig.tone || defaults.tone);
+    setServices((nextConfig.services ?? defaults.services).join('\n')); setOpeningHours(nextConfig.opening_hours || defaults.opening_hours); setSafetyRules(nextConfig.safety_rules || defaults.safety_rules);
+    setBookingLanguage(nextConfig.booking_language || defaults.booking_language); setKnowledge(knowledgeOf(nextConfig)); setFaqs(faqText(nextConfig.faqs ?? defaults.faqs));
+    setActions(actionsOf(nextConfig)); setTimezone(tenant.timezone);
+  }, [tenant.id]);
   async function save() {
     setSaving(true); setNotice('');
     try {
       const entries = faqs.split(/\n\s*\n/).map((block) => block.split('\n').map((line) => line.trim()).filter(Boolean)).filter((lines) => lines.length >= 2).map((lines) => ({ question: lines[0], answer: lines.slice(1).join(' ') }));
-      const next = await api.updateTenant(tenant.id, { timezone, receptionist_config: { ...tenant.receptionist_config, greeting, knowledge_base: knowledge.text, knowledge_base_file: knowledge.file, faqs: entries, transfer_enabled: true } });
+      const enabledActions = { ...actions };
+      const next = await api.updateTenant(tenant.id, { timezone, receptionist_config: { ...tenant.receptionist_config, greeting, persona_name: personaName, tone, services: services.split(/[\n,]/).map((item) => item.trim()).filter(Boolean), opening_hours: openingHours, safety_rules: safetyRules, booking_language: bookingLanguage, knowledge_base: knowledge.text, knowledge_base_file: knowledge.file, faqs: entries, enabled_actions: enabledActions, transfer_enabled: enabledActions.hand_off } });
       onUpdate(next); setNotice('Reception settings saved.');
-    } catch (cause) { setNotice(cause instanceof Error && cause.message ? cause.message : 'Could not save reception settings.'); }
+    } catch (cause) { setNotice(cause instanceof Error && cause.message ? cause.message : 'Could not save receptionist settings.'); }
     finally { setSaving(false); }
   }
-  return <div className="settings-layout"><section className="panel settings-main"><div className="panel-head"><div><div className="eyebrow">CALLER EXPERIENCE</div><h2>Reception instructions</h2></div><span className="mini-badge">{tenant.business_type.replaceAll('_', ' ')}</span></div><label className="field-label">Opening greeting<span>What callers hear when the assistant answers.</span></label><textarea className="textarea greeting-input" value={greeting} maxLength={800} onChange={(event) => setGreeting(event.target.value)} /><label className="field-label">Knowledge base<span>Upload a PDF with the clinic’s policies, services, prices, hours and other reference information. Press Save reception setup afterwards to apply it.</span></label><KnowledgeUpload value={knowledge} onChange={setKnowledge} disabled={saving} /><label className="field-label">Frequently asked questions<span>Separate each entry with a blank line. Put the question first, then the answer.</span></label><textarea className="textarea faq-input" placeholder={'Do you accept walk-ins?\nWe recommend booking ahead so we can find a time that works for you.\n\nWhat are your hours?\nPlease check the clinic website for today’s hours.'} value={faqs} onChange={(event) => setFaqs(event.target.value)} /><div className="settings-footer">{notice && <span className="inline-notice">{notice}</span>}<button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : 'Save reception setup'}</button></div></section><aside className="panel settings-aside"><div className="eyebrow">CLINIC PROFILE</div><h2>{tenant.name}</h2><label className="field-label">Clinic time zone</label><select className="select-field" value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">Eastern Time — New York</option><option value="America/Chicago">Central Time — Chicago</option><option value="America/Denver">Mountain Time — Denver</option><option value="America/Los_Angeles">Pacific Time — Los Angeles</option><option value="UTC">UTC</option></select><div className="privacy-note"><ShieldCheck size={16} /><span>Changes apply to the active clinic. Only clinic managers and owners can edit this setup.</span></div></aside></div>;
+  const updateAction = (key: keyof typeof actions, value: boolean) => setActions((current) => ({ ...current, [key]: value }));
+  return <div className="settings-layout">
+    <section className="panel settings-main">
+      <div className="panel-head"><div><div className="eyebrow">CALLER EXPERIENCE</div><h2>Reception instructions</h2></div><span className="mini-badge">{BUSINESS_TEMPLATES[tenant.business_type === 'dental_clinic' ? 'dental' : BUSINESS_TEMPLATE_IDS.includes(tenant.business_type as BusinessTemplateId) ? tenant.business_type as BusinessTemplateId : 'general'].label}</span></div>
+      <label className="field-label">Receptionist persona name<span>The first name the assistant uses when introducing itself.</span></label><input className="input-field" value={personaName} maxLength={80} onChange={(event) => setPersonaName(event.target.value)} />
+      <label className="field-label">Tone<span>Describe the voice and style in a few words. The assistant will stay brief and ask one question at a time.</span></label><input className="input-field" value={tone} maxLength={500} onChange={(event) => setTone(event.target.value)} />
+      <label className="field-label">Services or common requests<span>One item per line. Only list services this business actually provides.</span></label><textarea className="textarea" value={services} onChange={(event) => setServices(event.target.value)} />
+      <label className="field-label">Opening hours<span>Leave as not configured until confirmed; the assistant will not guess.</span></label><textarea className="textarea" value={openingHours} onChange={(event) => setOpeningHours(event.target.value)} />
+      <label className="field-label">Opening greeting<span>What callers hear when the assistant answers.</span></label><textarea className="textarea greeting-input" value={greeting} maxLength={800} onChange={(event) => setGreeting(event.target.value)} />
+      <label className="field-label">Safety guidance<span>Template-specific limits for what the receptionist must not advise or promise.</span></label><textarea className="textarea" value={safetyRules} maxLength={3000} onChange={(event) => setSafetyRules(event.target.value)} />
+      <label className="field-label">Booking wording<span>How the receptionist should refer to appointments, reservations, or service visits.</span></label><textarea className="textarea" value={bookingLanguage} maxLength={1000} onChange={(event) => setBookingLanguage(event.target.value)} />
+      <div className="field-label">Enabled actions<span>Disabled actions are hidden from the model and rejected by the voice session.</span></div>
+      <div className="action-options">
+        <label><input type="checkbox" checked={actions.booking} onChange={(event) => updateAction('booking', event.target.checked)} /> Allow bookings <small>Requires a working Cal.com connection. Message-taking is a separate action and must also be enabled.</small></label>
+        <label><input type="checkbox" checked={actions.take_messages} onChange={(event) => updateAction('take_messages', event.target.checked)} /> Take messages <small>Saves a callback note to Call activity when the business database is connected.</small></label>
+        <label><input type="checkbox" checked={actions.hand_off} onChange={(event) => updateAction('hand_off', event.target.checked)} /> Request staff handoff <small>Creates a browser-test handoff event; it does not place a phone call.</small></label>
+      </div>
+      <label className="field-label">Knowledge base<span>Upload a PDF with the business’s policies, services, prices, hours, and other reference information. Press Save to apply it.</span></label><KnowledgeUpload value={knowledge} onChange={setKnowledge} disabled={saving} />
+      <label className="field-label">Frequently asked questions<span>Separate each entry with a blank line. Put the question first, then the answer.</span></label><textarea className="textarea faq-input" placeholder={'What services do you offer?\nPlease ask the receptionist about the listed services.\n\nWhat are your hours?\nWe do not have confirmed hours available.'} value={faqs} onChange={(event) => setFaqs(event.target.value)} />
+      <div className="settings-footer">{notice && <span className="inline-notice">{notice}</span>}<button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : 'Save reception setup'}</button></div>
+    </section>
+    <aside className="panel settings-aside"><div className="eyebrow">BUSINESS PROFILE</div><h2>{tenant.name}</h2><label className="field-label">Business time zone</label><select className="select-field" value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">Eastern Time — New York</option><option value="America/Chicago">Central Time — Chicago</option><option value="America/Denver">Mountain Time — Denver</option><option value="America/Los_Angeles">Pacific Time — Los Angeles</option><option value="UTC">UTC</option></select><div className="privacy-note"><ShieldCheck size={16} /><span>Changes apply to this business and take effect on the next call. Only business managers and owners can edit this setup.</span></div></aside>
+  </div>;
 }
 
 const emptyProviderFields = () => ({ geminiApiKey: '', calcomApiKey: '', calcomEventTypeId: '', calcomEventLink: '', supabaseUrl: '', supabaseSecretKey: '', accountSid: '', authToken: '', phoneNumber: '' });
@@ -283,7 +328,7 @@ function Integrations({ tenant }: { tenant: Company }) {
   const providerInfo: Record<string, { title: string; description: string }> = {
     gemini: { title: 'Gemini Live', description: 'Realtime conversation, speech understanding, and receptionist tool selection.' },
     calcom: { title: 'Cal.com scheduling', description: 'Availability, appointment booking, rescheduling, and cancellations.' },
-    supabase: { title: 'Clinic Supabase database', description: 'This clinic’s own database for call history and appointments. Nothing is shared with other clinics.' },
+    supabase: { title: 'Business Supabase database', description: 'This business’s own database for call history and bookings. Nothing is shared with other businesses.' },
     twilio: { title: 'Twilio credentials', description: 'Optional credential storage only. Phone transport remains disconnected.' },
   };
   const providers = [
@@ -341,7 +386,7 @@ function CallActivity({ tenant }: { tenant: Company }) {
   const [problem, setProblem] = useState('');
   const [error, setError] = useState('');
   useEffect(() => { setError(''); void api.calls(tenant.id).then((result) => { setRows(result.calls); setConnected(result.connected); setProblem(result.problem ?? ''); }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Could not load call activity.')); }, [tenant.id]);
-  return <><div className="panel call-list-panel"><div className="panel-head"><div><div className="eyebrow">CALL HISTORY</div><h2>Recent sessions</h2></div><span className="mini-badge">{rows.length} RECORDS</span></div>{error && <div className="alert error">{error}</div>}{!connected && <div className="alert warn">{problem || 'This clinic’s Supabase database is not connected, so calls are not being saved.'} Check it under Integrations → Clinic Supabase database.</div>}<CallTable rows={rows} tenantId={tenant.id} /></div><div className="privacy-note full-note"><ShieldCheck size={16} /><span>Conversation text can contain personal information. Raw browser audio is not recorded. Define retention and consent before using real patient data.</span></div></>;
+  return <><div className="panel call-list-panel"><div className="panel-head"><div><div className="eyebrow">CALL HISTORY</div><h2>Recent sessions</h2></div><span className="mini-badge">{rows.length} RECORDS</span></div>{error && <div className="alert error">{error}</div>}{!connected && <div className="alert warn">{problem || 'This business’s Supabase database is not connected, so calls are not being saved.'} Check it under Integrations → Business Supabase database.</div>}<CallTable rows={rows} tenantId={tenant.id} /></div><div className="privacy-note full-note"><ShieldCheck size={16} /><span>Conversation text can contain personal information. Raw browser audio is not recorded. Define retention and consent before using real caller or customer data.</span></div></>;
 }
 
 function CallTable({ rows, tenantId }: { rows: CallRow[]; tenantId: string }) {
@@ -378,8 +423,9 @@ function CallDetailView({ tenantId, callId }: { tenantId: string; callId: string
 
 function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: NewTenantInput) => Promise<void> }) {
   const [name, setName] = useState('');
+  const [businessType, setBusinessType] = useState<BusinessTemplateId>('general');
   const [timezone, setTimezone] = useState('America/New_York');
-  const [greeting, setGreeting] = useState('Thank you for calling. How can I help you today?');
+  const [greeting, setGreeting] = useState(() => defaultReceptionistSettings('general').greeting);
   const [knowledge, setKnowledge] = useState<KnowledgeValue>({ text: '', file: null });
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [calcomApiKey, setCalcomApiKey] = useState('');
@@ -401,14 +447,34 @@ function CreateTenantModal({ onClose, onCreate }: { onClose: () => void; onCreat
     event.preventDefault(); setSaving(true); setError('');
     try {
       await onCreate({
-        name, timezone,
-        receptionist_config: { greeting, knowledge_base: knowledge.text, knowledge_base_file: knowledge.file },
+        name, business_type: businessType, timezone,
+        receptionist_config: { ...defaultReceptionistSettings(businessType), greeting, knowledge_base: knowledge.text, knowledge_base_file: knowledge.file },
         integrations: { geminiApiKey, supabaseUrl, supabaseSecretKey, calcomApiKey, calcomEventTypeId, calcomEventLink },
       });
     } catch (cause) {
-      setError(cause instanceof Error && cause.message ? cause.message : 'Could not create the clinic. Try again.');
+      setError(cause instanceof Error && cause.message ? cause.message : 'Could not create the business. Try again.');
     } finally { setSaving(false); }
   }
   const secretField = (label: string, value: string, change: (value: string) => void, placeholder: string) => <label className="form-field"><span>{label}</span><input type="password" autoComplete="new-password" value={value} onChange={(event) => change(event.target.value)} placeholder={placeholder} /></label>;
-  return <div className="modal-backdrop" onClick={onClose}><section className="modal-card" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><div className="eyebrow">NEW CLINIC AGENT</div><h2>Add clinic agent</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div><p>Only the clinic name is needed. Everything else is optional and can be added or fixed later under Integrations; the clinic is created either way, and anything that does not check out is listed afterwards. Keys are stored encrypted and never shown again.</p>{error && <div className="alert error" ref={errorRef} role="alert">{error}</div>}<form onSubmit={(event) => void submit(event)}><label className="form-field"><span>Clinic name</span><input required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Northside Dental" /></label><label className="form-field"><span>Time zone</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">America/New_York</option><option value="America/Chicago">America/Chicago</option><option value="America/Denver">America/Denver</option><option value="America/Los_Angeles">America/Los_Angeles</option><option value="UTC">UTC</option></select></label><label className="form-field"><span>Receptionist greeting</span><textarea className="textarea" value={greeting} onChange={(event) => setGreeting(event.target.value)} /></label><div className="eyebrow">KNOWLEDGE BASE</div><KnowledgeUpload value={knowledge} onChange={setKnowledge} disabled={saving} /><div className="eyebrow">CLINIC DATABASE</div><div className="privacy-note"><ShieldCheck size={16} /><span>Each clinic keeps its call history and appointments in its own Supabase project. Paste its URL and <strong>secret</strong> key (Project Settings → API Keys). Run <code>supabase/clinic-schema.sql</code> in that project’s SQL Editor once for a new project; a project from an earlier version is repaired automatically.</span></div><label className="form-field"><span>Supabase project URL</span><input autoComplete="off" value={supabaseUrl} onChange={(event) => setSupabaseUrl(event.target.value)} placeholder="https://your-project.supabase.co" /></label>{secretField('Supabase secret key', supabaseSecretKey, setSupabaseSecretKey, 'sb_secret_… (not the publishable key)')}<div className="eyebrow">VOICE</div>{secretField('Gemini API key', geminiApiKey, setGeminiApiKey, 'Needed for the voice agent to answer')}<div className="eyebrow">SCHEDULING</div><div className="privacy-note"><ShieldCheck size={16} /><span>Add the Cal.com API key and either the event’s link (for example https://cal.com/your-name/30min) or its numeric event type ID.</span></div>{secretField('Cal.com API key', calcomApiKey, setCalcomApiKey, 'cal_live_…')}<label className="form-field"><span>Cal.com event link</span><input autoComplete="off" value={calcomEventLink} onChange={(event) => setCalcomEventLink(event.target.value)} placeholder="https://cal.com/your-name/30min" /></label><label className="form-field"><span>Or numeric event type ID</span><input inputMode="numeric" autoComplete="off" value={calcomEventTypeId} onChange={(event) => setCalcomEventTypeId(event.target.value)} placeholder="e.g. 7768457" /></label><div className="modal-actions"><button type="button" className="button ghost" onClick={onClose}>Cancel</button><button className="button primary" disabled={saving}>{saving ? 'Creating…' : 'Create clinic agent'}</button></div></form></section></div>;
+  return <div className="modal-backdrop" onClick={onClose}>
+    <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+      <div className="modal-head"><div><div className="eyebrow">NEW RECEPTIONIST</div><h2>Create a business receptionist</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={18} /></button></div>
+      <p>Only a business name is required. Provider connections are optional; you can add or fix them later. Any provider check that fails is shown as a warning. Secret keys are stored encrypted and never shown again.</p>
+      {error && <div className="alert error" ref={errorRef} role="alert">{error}</div>}
+      <form onSubmit={(event) => void submit(event)}>
+        <label className="form-field"><span>Business template</span><select aria-label="Business template" value={businessType} onChange={(event) => { const next = event.target.value as BusinessTemplateId; setBusinessType(next); setGreeting(defaultReceptionistSettings(next).greeting); }}>{BUSINESS_TEMPLATE_IDS.map((id) => <option key={id} value={id}>{BUSINESS_TEMPLATES[id].label}</option>)}</select></label>
+        <div className="privacy-note"><ShieldCheck size={16} /><span>{BUSINESS_TEMPLATES[businessType].descriptor}. This template pre-fills a greeting, safety guidance, example FAQs, services, and booking wording. Review and customize them under Reception setup after creation.</span></div>
+        <label className="form-field"><span>Business name</span><input required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Northside Dental, Studio Rose, or Main Street Cafe" /></label>
+        <label className="form-field"><span>Time zone</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option value="America/New_York">America/New_York</option><option value="America/Chicago">America/Chicago</option><option value="America/Denver">America/Denver</option><option value="America/Los_Angeles">America/Los_Angeles</option><option value="UTC">UTC</option></select></label>
+        <label className="form-field"><span>Receptionist greeting</span><textarea className="textarea" value={greeting} onChange={(event) => setGreeting(event.target.value)} /></label>
+        <div className="eyebrow">KNOWLEDGE BASE</div><KnowledgeUpload value={knowledge} onChange={setKnowledge} disabled={saving} />
+        <div className="eyebrow">BUSINESS DATABASE</div><div className="privacy-note"><ShieldCheck size={16} /><span>Each business keeps its own call history and bookings in its own Supabase project. Paste its URL and <strong>secret</strong> key (Project Settings → API Keys). Run <code>supabase/clinic-schema.sql</code> in a new project; that legacy filename and its table names are kept for existing setups. Projects from earlier versions are repaired automatically.</span></div>
+        <label className="form-field"><span>Supabase project URL</span><input autoComplete="off" value={supabaseUrl} onChange={(event) => setSupabaseUrl(event.target.value)} placeholder="https://your-project.supabase.co" /></label>{secretField('Supabase secret key', supabaseSecretKey, setSupabaseSecretKey, 'sb_secret_… (not the publishable key)')}
+        <div className="eyebrow">VOICE</div>{secretField('Gemini API key', geminiApiKey, setGeminiApiKey, 'Needed for the voice receptionist to answer')}
+        <div className="eyebrow">SCHEDULING (OPTIONAL)</div><div className="privacy-note"><ShieldCheck size={16} /><span>Cal.com enables bookings. Without it, the receptionist can still answer questions and take enabled messages. A connected Supabase project is required to save those messages in Call activity. Add a Cal.com API key and either an event link (for example https://cal.com/your-name/30min) or an event type ID to enable booking.</span></div>
+        {secretField('Cal.com API key', calcomApiKey, setCalcomApiKey, 'cal_live_…')}<label className="form-field"><span>Cal.com event link</span><input autoComplete="off" value={calcomEventLink} onChange={(event) => setCalcomEventLink(event.target.value)} placeholder="https://cal.com/your-name/30min" /></label><label className="form-field"><span>Or numeric event type ID</span><input inputMode="numeric" autoComplete="off" value={calcomEventTypeId} onChange={(event) => setCalcomEventTypeId(event.target.value)} placeholder="e.g. 7768457" /></label>
+        <div className="modal-actions"><button type="button" className="button ghost" onClick={onClose}>Cancel</button><button className="button primary" disabled={saving}>{saving ? 'Creating…' : 'Create business'}</button></div>
+      </form>
+    </section>
+  </div>;
 }

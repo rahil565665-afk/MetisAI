@@ -1,4 +1,5 @@
 import type { Company, IntegrationStatus, SessionUser } from './types.js';
+import type { BusinessTemplateId, EnabledActions } from '../shared/businessTemplates.js';
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -18,8 +19,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export interface NewTenantInput {
   name: string;
+  business_type: BusinessTemplateId;
   timezone: string;
-  receptionist_config: { greeting: string; knowledge_base: string; knowledge_base_file: { name: string; pages: number; characters: number } | null };
+  receptionist_config: {
+    greeting: string;
+    persona_name: string;
+    tone: string;
+    services: string[];
+    opening_hours: string;
+    safety_rules: string;
+    booking_language: string;
+    faqs: Array<{ question: string; answer: string }>;
+    enabled_actions: EnabledActions;
+    knowledge_base: string;
+    knowledge_base_file: { name: string; pages: number; characters: number } | null;
+  };
   /** Everything here is optional: a clinic is created whatever is filled in, and problems come back as warnings. */
   integrations: {
     geminiApiKey: string;

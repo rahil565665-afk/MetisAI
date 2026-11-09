@@ -8,16 +8,16 @@ interface TranscriptRow { role: 'assistant' | 'user' | 'system'; text: string; f
 interface VoiceTokenResponse { token: string; expiresInSeconds: number; }
 
 const OPERATION_TITLE: Record<ApprovalRequest['operation'], string> = {
-  create_booking: 'Book appointment',
-  reschedule_booking: 'Reschedule appointment',
-  cancel_booking: 'Cancel appointment',
+  create_booking: 'Create booking',
+  reschedule_booking: 'Reschedule booking',
+  cancel_booking: 'Cancel booking',
 };
 
 /** Why a call ended, for every reason except the person hanging up. Shown in the notice and in the transcript. */
 const ENDED_TEXT: Partial<Record<EndReason, string>> = {
   time_limit: 'The test call reached its time limit and was ended. Start a new test call to keep going.',
   idle: 'The test call was ended because nobody spoke for a while. Start a new test call to continue.',
-  admin: 'The call was ended by an administrator, for example because this clinic’s settings changed. Start a new test call to use the new settings.',
+  admin: 'The call was ended by an administrator, for example because this business’s settings changed. Start a new test call to use the new settings.',
   service: 'The call was ended by the voice service. Start a new test call to try again.',
 };
 
@@ -89,8 +89,8 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
       approval: (request) => setPending({ approvalId: request.approvalId, summary: describeApproval(request) }),
       approvalClosed: (approvalId) => setPending((current) => current?.approvalId === approvalId ? null : current),
       escalation: (reason) => setError(reason
-        ? `A clinic team member has been requested: ${reason}. This browser test cannot transfer the call to a phone line.`
-        : 'A clinic team member has been requested. This browser test cannot transfer the call to a phone line.'),
+        ? `A business team member has been requested: ${reason}. This browser test cannot transfer the call to a phone line.`
+        : 'A business team member has been requested. This browser test cannot transfer the call to a phone line.'),
       notice: setNotice,
       callInfo: (scheduling, history) => setInfo({ scheduling, history }),
       error: setError,
@@ -114,7 +114,7 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
 
   function decide(approved: boolean) {
     if (pending) clientRef.current?.respond(pending.approvalId, approved);
-    if (!approved) appendTranscript({ role: 'system', text: 'Appointment action was not approved. No change was made.', final: true });
+    if (!approved) appendTranscript({ role: 'system', text: 'Booking action was not approved. No change was made.', final: true });
     setPending(null);
   }
 
@@ -130,9 +130,9 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
       <div className="voice-stage-top"><div><div className="eyebrow">LIVE BROWSER SESSION</div><h2>{tenant.name}</h2></div><span className={`call-state ${live ? 'live' : 'done'}`}><i />{statusLabel[status]}</span></div>
       <div className={`voice-circle ${status}`}><div className="voice-circle-inner"><div className="voice-ring ring-one" /><div className="voice-ring ring-two" />{status === 'error' ? <ShieldAlert size={27} /> : status === 'disconnected' ? <MicOff size={25} /> : <AudioLines size={28} />}</div></div>
       <div className="voice-timer">{minutes}:{seconds}</div>
-      <p className="voice-caption">{status === 'idle' ? 'Your microphone is off until you begin a test call.' : status === 'listening' ? 'Say hello. The assistant will answer using this clinic’s configuration.' : status === 'speaking' ? 'Listen to the response, or speak to interrupt.' : status === 'transfer_requested' ? 'A handoff event has been recorded for clinic staff. No phone transfer occurred.' : status === 'disconnected' ? 'The test session has ended.' : statusLabel[status] + '…'}</p>
+      <p className="voice-caption">{status === 'idle' ? 'Your microphone is off until you begin a test call.' : status === 'listening' ? 'Say hello. The assistant will answer using this business’s configuration.' : status === 'speaking' ? 'Listen to the response, or speak to interrupt.' : status === 'transfer_requested' ? 'A handoff event has been recorded for business staff. No phone transfer occurred.' : status === 'disconnected' ? 'The test session has ended.' : statusLabel[status] + '…'}</p>
       {info && <ul className="call-checks" aria-label="Call checks">
-        <li className={info.scheduling.available ? 'ok' : 'bad'}>{info.scheduling.available ? 'Booking: ready' : `Booking unavailable${info.scheduling.reason ? `: ${info.scheduling.reason}` : ''}. Fix it under Integrations → Cal.com scheduling; until then the receptionist will only take a message.`}</li>
+        <li className={info.scheduling.available ? 'ok' : 'bad'}>{info.scheduling.available ? 'Booking: ready' : info.scheduling.reason?.includes('turned off') ? 'Booking is disabled for this business in Reception setup.' : `Booking unavailable${info.scheduling.reason ? `: ${info.scheduling.reason}` : ''}. Check Integrations → Cal.com scheduling; the receptionist can use other enabled actions.`}</li>
         <li className={info.history.state === 'not_saved' ? 'bad' : 'ok'}>{info.history.state === 'saved' ? (live ? 'Call history: this call is being recorded in Call activity' : 'Call history: saved to Call activity') : info.history.state === 'pending' ? 'Call history: checking…' : `Call history: not saved${info.history.problem ? `. ${info.history.problem}` : ''}`}</li>
       </ul>}
       {visibleError && <div className="alert error voice-error">{visibleError}</div>}{notice && !visibleError && <div className="alert voice-error">{notice}</div>}
@@ -144,6 +144,6 @@ export function VoiceTester({ tenant }: { tenant: Company }) {
       <div className="transcript-list" ref={transcriptRef}>{transcript.length ? transcript.map((item, index) => <div className={`transcript-line ${item.role}`} key={index}><span>{item.role === 'assistant' ? 'ASSISTANT' : item.role === 'user' ? 'CALLER' : 'SYSTEM'}</span><p>{item.text}</p></div>) : <div className="transcript-empty"><Headphones size={22} /><p>Start a test call to see the conversation here.</p></div>}</div>
       <div className="transcript-footer"><Mic size={14} /> {live ? 'Microphone connected · Browser audio' : 'No active microphone'}<span className={live ? 'status-dot mint' : 'status-dot'} /></div>
     </section>
-    {pending && <div className="modal-backdrop"><section className="modal-card confirm-modal" role="dialog" aria-modal="true" aria-labelledby="appointment-confirmation-title"><div className="confirm-icon"><ShieldAlert size={20} /></div><div className="eyebrow">CALLER APPROVAL REQUIRED</div><h2 id="appointment-confirmation-title">Confirm appointment action</h2><p>{pending.summary}</p><div className="confirm-warning">Nothing will be changed until you approve this action.</div><div className="modal-actions"><button className="button ghost" onClick={() => decide(false)}><X size={15} /> Don’t proceed</button><button className="button primary" onClick={() => decide(true)}><Check size={15} /> Approve action</button></div></section></div>}
+    {pending && <div className="modal-backdrop"><section className="modal-card confirm-modal" role="dialog" aria-modal="true" aria-labelledby="booking-confirmation-title"><div className="confirm-icon"><ShieldAlert size={20} /></div><div className="eyebrow">CALLER APPROVAL REQUIRED</div><h2 id="booking-confirmation-title">Confirm booking action</h2><p>{pending.summary}</p><div className="confirm-warning">Nothing will be changed until you approve this action.</div><div className="modal-actions"><button className="button ghost" onClick={() => decide(false)}><X size={15} /> Don’t proceed</button><button className="button primary" onClick={() => decide(true)}><Check size={15} /> Approve action</button></div></section></div>}
   </div>;
 }

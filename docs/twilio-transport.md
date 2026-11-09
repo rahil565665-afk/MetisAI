@@ -1,6 +1,6 @@
 # Twilio: configuration fields only
 
-The current audio transport is the browser WebSocket tester: the dashboard connects to the clinic's Durable Object, which relays audio to Gemini Live. The dashboard provides optional per-clinic Twilio Account SID, Auth Token and E.164 phone-number fields. Saving these values stores them encrypted in the console's database, but `TWILIO_ENABLED` remains `false` and the interface labels Twilio as not connected.
+The current audio transport is the browser WebSocket tester: the dashboard connects to the business's Durable Object, which relays audio to Gemini Live. The dashboard provides optional per-business Twilio Account SID, Auth Token and E.164 phone-number fields. Saving these values stores them encrypted in the console's database, but `TWILIO_ENABLED` remains `false` and the interface labels Twilio as not connected.
 
 There is no Twilio SDK/API call, number provisioning, phone webhook, Media Streams WebSocket endpoint, signature validation, PSTN routing, or human telephone transfer in this release. A request for a human in the browser only emits an escalation event and call-log flag.
 

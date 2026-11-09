@@ -84,9 +84,9 @@ test('audio at an unexpected sample rate is reported, not played', () => {
 });
 
 test('tool calls and cancellations are extracted; malformed calls are dropped', () => {
-  const frame = JSON.stringify({ toolCall: { functionCalls: [{ id: 'c1', name: 'check_dental_availability', args: { start: 'x' } }, { name: 'no-id' }, { id: 'c3', name: 'request_human_transfer' }] } });
+  const frame = JSON.stringify({ toolCall: { functionCalls: [{ id: 'c1', name: 'check_availability', args: { start: 'x' } }, { name: 'no-id' }, { id: 'c3', name: 'request_human_transfer' }] } });
   const [event] = parseServerMessage(frame);
-  assert.deepEqual(event, { kind: 'toolCall', calls: [{ id: 'c1', name: 'check_dental_availability', args: { start: 'x' } }, { id: 'c3', name: 'request_human_transfer', args: {} }] });
+  assert.deepEqual(event, { kind: 'toolCall', calls: [{ id: 'c1', name: 'check_availability', args: { start: 'x' } }, { id: 'c3', name: 'request_human_transfer', args: {} }] });
   assert.deepEqual(parseServerMessage('{"toolCallCancellation":{"ids":["c1",7]}}'), [{ kind: 'toolCancel', ids: ['c1'] }]);
 });
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ToolError, awareIso, bookingStatus, callerConfirmed, cleanBookingUid, cleanEmail, cleanPersonName, cleanPhone, cleanText, cleanTimeZone, spellEmail, utcIso } from './validation.js';
+import { ToolError, awareIso, bookingStatus, callerConfirmed, cleanBookingUid, cleanEmail, cleanPersonName, cleanPhone, cleanText, cleanTimeZone, localDateRange, spellEmail, utcIso } from './validation.js';
 
 test('cleanText trims and rejects empty, long, non-string and control characters', () => {
   assert.equal(cleanText('  Ada  ', 'name', 10), 'Ada');
@@ -80,6 +80,21 @@ test('cleanTimeZone checks the IANA database and defaults to UTC', () => {
   assert.equal(cleanTimeZone('America/Chicago'), 'America/Chicago');
   assert.equal(cleanTimeZone(undefined), 'UTC');
   assert.throws(() => cleanTimeZone('Mars/Olympus'), ToolError);
+});
+
+test('local calendar dates convert to full business days across DST changes', () => {
+  const fallBack = localDateRange('2026-11-01', '2026-11-01', 'America/Los_Angeles');
+  assert.equal(fallBack.start.toISOString(), '2026-11-01T07:00:00.000Z');
+  assert.equal(fallBack.end.toISOString(), '2026-11-02T08:00:00.000Z');
+  const springForward = localDateRange('2026-03-08', '2026-03-08', 'America/Los_Angeles');
+  assert.equal(springForward.start.toISOString(), '2026-03-08T08:00:00.000Z');
+  assert.equal(springForward.end.toISOString(), '2026-03-09T07:00:00.000Z');
+});
+
+test('local date ranges reject invalid dates, reversed windows, and more than 14 days', () => {
+  for (const [start, end] of [['2026-02-30', undefined], ['2026-11-02', '2026-11-01'], ['2026-11-01', '2026-11-15']]) {
+    assert.throws(() => localDateRange(start, end, 'UTC'), ToolError);
+  }
 });
 
 test('utcIso drops milliseconds but keeps the Z', () => {

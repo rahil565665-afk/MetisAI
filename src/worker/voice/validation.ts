@@ -147,6 +147,75 @@ export function cleanTimeZone(value: unknown): string {
   return name;
 }
 
+interface CalendarDate { text: string; year: number; month: number; day: number; ordinal: number }
+
+function calendarDate(value: unknown, label: string): CalendarDate {
+  const text = cleanText(value, label, 10);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) throw new ToolError(`${label} must be a calendar date in YYYY-MM-DD format`);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const ordinal = Date.UTC(year, month - 1, day);
+  if (year < 1900 || year > 2200 || new Date(ordinal).toISOString().slice(0, 10) !== text) {
+    throw new ToolError(`${label} must be a real calendar date`);
+  }
+  return { text, year, month, day, ordinal };
+}
+
+function datePartsAt(epoch: number, formatter: Intl.DateTimeFormat): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(epoch)).map((part) => [part.type, part.value]));
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second) };
+}
+
+/** The first instant belonging to a local calendar date, including zones that skip midnight. */
+function firstInstantOfLocalDate(date: CalendarDate, formatter: Intl.DateTimeFormat): Date {
+  let guess = date.ordinal;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const local = datePartsAt(guess, formatter);
+    const representedAsUtc = Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second);
+    const next = guess + date.ordinal - representedAsUtc;
+    if (next === guess && local.year === date.year && local.month === date.month && local.day === date.day && local.hour === 0 && local.minute === 0 && local.second === 0) {
+      return new Date(guess);
+    }
+    if (!Number.isFinite(next) || Math.abs(next - guess) > 48 * 60 * 60 * 1000) break;
+    guess = next;
+  }
+
+  // Rare zones have historically skipped midnight. Find the first instant of the date instead of
+  // assuming a 24-hour offset or silently shifting the requested day.
+  let low = date.ordinal - 48 * 60 * 60 * 1000;
+  let high = date.ordinal + 48 * 60 * 60 * 1000;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const local = datePartsAt(middle, formatter);
+    const key = `${String(local.year).padStart(4, '0')}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
+    if (key < date.text) low = middle + 1;
+    else high = middle;
+  }
+  const first = datePartsAt(low, formatter);
+  if (first.year !== date.year || first.month !== date.month || first.day !== date.day) {
+    throw new ToolError(`${date.text} does not exist in the business time zone`);
+  }
+  return new Date(low);
+}
+
+/** Convert inclusive business-local dates into UTC bounds for Cal.com, correctly spanning DST changes. */
+export function localDateRange(startValue: unknown, endValue: unknown, timeZoneValue: unknown): { start: Date; end: Date; timeZone: string } {
+  const startDate = calendarDate(startValue, 'date');
+  const endDate = calendarDate(endValue ?? startValue, 'end_date');
+  const daysApart = (endDate.ordinal - startDate.ordinal) / 86_400_000;
+  if (daysApart < 0 || daysApart > 13) throw new ToolError('Availability date range must be ordered and no longer than 14 calendar days');
+  const timeZone = cleanTimeZone(timeZoneValue);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  });
+  const nextDate = calendarDate(new Date(endDate.ordinal + 86_400_000).toISOString().slice(0, 10), 'end_date');
+  return { start: firstInstantOfLocalDate(startDate, formatter), end: firstInstantOfLocalDate(nextDate, formatter), timeZone };
+}
+
 /** Cal.com expects UTC instants like 2026-11-05T04:30:00Z. */
 export function utcIso(date: Date): string {
   return date.toISOString().replace(/\.000Z$/, 'Z');

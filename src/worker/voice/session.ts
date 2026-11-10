@@ -125,6 +125,8 @@ const MAX_LOG_CHARS = 120_000;
 const MAX_EVENTS = 100;
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const RECOVERY_TRIGGER = 'INTERNAL RECOVERY CUE: the voice service briefly disconnected. Apologize once and ask the caller to repeat their last request.';
+const MUTATING_TOOLS = new Set(['create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
 
 /**
  * One browser test call: the browser's microphone audio goes to Gemini Live, Gemini's spoken reply
@@ -138,6 +140,7 @@ export class VoiceSession {
   /** A replacement connection that has been opened but has not yet accepted its setup message. */
   private pending: VoiceSocket | null = null;
   private pendingSettled: ((ok: boolean) => void) | null = null;
+  private pendingFreshRecovery = false;
   private resumeHandle: string | null = null;
   private longSession = true;
   private setupRetried = false;
@@ -166,6 +169,8 @@ export class VoiceSession {
   private ready = false;
   private finished = false;
   private transferRequested = false;
+  /** A fresh model session is unsafe after a write was attempted; resume only or fail closed. */
+  private mutationAttempted = false;
   private lastActivity = Date.now();
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private setupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -249,12 +254,16 @@ export class VoiceSession {
     this.send({ type: 'call_info', scheduling: { available: scheduling.available, ...(scheduling.reason ? { reason: scheduling.reason } : {}) }, history: this.history });
   }
 
-  private setup(resumeHandle: string | null): string {
+  private setup(resumeHandle: string | null, freshRecovery = false): string {
     const prepared = this.prepared as PreparedSession;
+    const baseInstruction = buildSystemInstruction(prepared.config, this.now(), this.scheduling());
+    const systemInstruction = freshRecovery
+      ? `${baseInstruction}\n\nCONNECTION RECOVERY: This is a new model session after the previous voice connection dropped. No earlier conversation is available here. Treat the next realtime text input as an internal cue, not caller speech. Briefly apologize and ask the caller to repeat their last request. Do not claim any prior booking, cancellation, message, or handoff succeeded. Do not repeat a side effect unless the caller restates the request and all normal checks and confirmations are completed.`
+      : baseInstruction;
     return JSON.stringify(setupMessage({
       model: this.deps.model,
       voiceName: this.deps.voiceName,
-      systemInstruction: buildSystemInstruction(prepared.config, this.now(), this.scheduling()),
+      systemInstruction,
       tools: receptionistTools(prepared.config, this.scheduling()),
       resumeHandle,
       longSession: this.longSession,
@@ -363,7 +372,7 @@ export class VoiceSession {
     for (const event of parseServerMessage(data)) {
       if (this.finished) return;
       if (socket === this.pending) {
-        if (event.kind === 'setupComplete') this.promote(socket);
+        if (event.kind === 'setupComplete') this.promote(socket, this.pendingFreshRecovery);
         else if (event.kind === 'error') this.dropPending(socket);
       }
       // Connections that have been replaced or dropped are ignored.
@@ -419,11 +428,15 @@ export class VoiceSession {
         if (!handle) break;
         if (attempt > 1) await pause(this.limits.reconnectDelayMs * attempt);
         if (this.finished) return;
-        if (await this.openResumed(handle)) return;
+        if (await this.openReplacement(handle, false)) return;
         console.error('[voice-session] reconnect attempt failed', attempt, cause);
       }
       if (!this.finished && !this.gemini) {
-        await this.finish('service', `The voice service connection was lost and could not be restored${detail}.`);
+        if (!this.mutationAttempted && await this.openReplacement(null, true)) return;
+        const failure = this.mutationAttempted
+          ? `The voice service disconnected while a booking, message, or handoff may have been processing. Check Call activity and the connected service before trying again${detail ? ` (${detail})` : ''}.`
+          : `The voice service connection was lost and could not be restored${detail}. Try again.`;
+        await this.finish('service', failure);
       }
     } finally {
       this.reconnecting = false;
@@ -431,7 +444,7 @@ export class VoiceSession {
     }
   }
 
-  private async openResumed(handle: string): Promise<boolean> {
+  private async openReplacement(handle: string | null, freshRecovery: boolean): Promise<boolean> {
     const prepared = this.prepared;
     if (!prepared) return false;
     let socket: VoiceSocket;
@@ -447,10 +460,11 @@ export class VoiceSession {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => this.dropPending(socket), this.limits.setupTimeoutMs);
       this.pending = socket;
+      this.pendingFreshRecovery = freshRecovery;
       this.pendingSettled = (ok) => { clearTimeout(timer); resolve(ok); };
       this.attachGemini(socket);
       try {
-        socket.send(this.setup(handle));
+        socket.send(this.setup(handle, freshRecovery));
       } catch {
         this.dropPending(socket);
       }
@@ -466,15 +480,17 @@ export class VoiceSession {
   private dropPending(socket: VoiceSocket): void {
     if (this.pending !== socket) return;
     this.pending = null;
+    this.pendingFreshRecovery = false;
     this.closeQuietly(socket, NORMAL_CLOSE, 'Replacement failed');
     this.settlePending(false);
   }
 
   /** The replacement accepted its setup: switch over and retire the old connection. */
-  private promote(socket: VoiceSocket): void {
+  private promote(socket: VoiceSocket, freshRecovery = false): void {
     const old = this.gemini;
     this.gemini = socket;
     this.pending = null;
+    this.pendingFreshRecovery = false;
     this.epoch += 1;
     // Anything the old connection was waiting on can no longer be answered.
     this.gate.denyAll();
@@ -483,6 +499,12 @@ export class VoiceSession {
     if (old) this.closeQuietly(old, NORMAL_CLOSE, 'Replaced');
     this.endingSoon = false;
     this.updateNotice();
+    if (freshRecovery) {
+      this.flushTranscript();
+      this.callerWords = '';
+      this.send({ type: 'interrupted' });
+      this.sendGemini(textInputMessage(RECOVERY_TRIGGER));
+    }
   }
 
   private onGeminiEvent(event: GeminiEvent): void {
@@ -582,6 +604,7 @@ export class VoiceSession {
   }
 
   private async handleToolCalls(calls: ToolCall[], epoch: number): Promise<void> {
+    if (this.reconnecting || this.finished || epoch !== this.epoch) return;
     const prepared = this.prepared;
     if (!prepared) return;
     const deps: ToolDeps = {
@@ -591,6 +614,7 @@ export class VoiceSession {
       gate: this.gate,
       store: prepared.store,
       now: this.now,
+      businessTimeZone: prepared.config.timezone,
       escalate: (reason) => this.escalate(reason),
       bookings: this.bookings,
       callerSaid: () => this.callerAnswer(),
@@ -601,15 +625,16 @@ export class VoiceSession {
     };
     const results: ToolResult[] = [];
     for (const call of calls) {
-      if (this.finished || epoch !== this.epoch) return;
+      if (this.reconnecting || this.finished || epoch !== this.epoch) return;
       if (this.cancelledCalls.has(call.id)) continue;
+      if (MUTATING_TOOLS.has(call.name)) this.mutationAttempted = true;
       const response = await runTool(deps, call.name, call.args);
       // A call the model cancelled (the caller interrupted) gets no answer.
-      if (this.finished || this.cancelledCalls.has(call.id)) continue;
+      if (this.reconnecting || this.finished || this.cancelledCalls.has(call.id)) continue;
       results.push({ id: call.id, name: call.name, response });
     }
     // The connection was replaced while the tools ran; the new one knows nothing of these calls.
-    if (epoch !== this.epoch) return;
+    if (this.reconnecting || epoch !== this.epoch) return;
     if (results.length > 0 && !this.finished) {
       this.touch();
       this.sendGemini(toolResponseMessage(results));

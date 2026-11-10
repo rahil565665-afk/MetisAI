@@ -52,7 +52,9 @@ test('availability queries use the slots API version and the right selector', as
   assert.equal(call!.url.searchParams.get('teamSlug'), 'north');
   assert.equal(call!.url.searchParams.get('username'), null);
   assert.equal(call!.url.searchParams.get('start'), '2026-11-05T00:00:00Z');
+  assert.equal(call!.url.searchParams.get('end'), '2026-11-06T00:00:00Z');
   assert.equal(call!.url.searchParams.get('timeZone'), 'America/Chicago');
+  assert.equal(call!.url.searchParams.get('format'), 'range');
 });
 
 test('creating a booking posts the attendee and returns only a safe summary', async () => {

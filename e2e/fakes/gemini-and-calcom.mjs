@@ -24,9 +24,21 @@ const cal = http.createServer((req, res) => {
     if (req.url.startsWith('/v2/slots')) {
       if (req.headers.authorization !== 'Bearer cal_live_good') { res.statusCode = 401; return res.end('{}'); }
       if (req.url.includes('eventTypeSlug=missing') || req.url.includes('eventTypeId=404')) { res.statusCode = 404; return res.end('{}'); }
-      const day = bookingStart.toISOString().slice(0, 10);
+      const url = new URL(req.url, 'http://mock');
+      const start = Date.parse(url.searchParams.get('start') ?? '');
+      const end = Date.parse(url.searchParams.get('end') ?? '');
+      const timeZone = url.searchParams.get('timeZone') ?? 'UTC';
       const slot = (offsetMinutes) => ({ start: new Date(bookingStart.getTime() + offsetMinutes * 60_000).toISOString(), end: new Date(bookingStart.getTime() + (offsetMinutes + 30) * 60_000).toISOString() });
-      return res.end(JSON.stringify({ status: 'success', data: { [day]: [slot(0), slot(60), slot(120)] } }));
+      const data = {};
+      for (const candidate of [slot(0), slot(60), slot(120)]) {
+        const at = Date.parse(candidate.start);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || at < start || at >= end) continue;
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(at));
+        const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+        const day = `${values.year}-${values.month}-${values.day}`;
+        (data[day] ??= []).push(candidate);
+      }
+      return res.end(JSON.stringify({ status: 'success', data }));
     }
     res.statusCode = 404; res.end('{}');
   });

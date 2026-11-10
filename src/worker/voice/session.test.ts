@@ -537,13 +537,38 @@ test('Gemini going quiet during setup times out', async () => {
   assert.match(r.client.json.find((message) => message.type === 'error').message, /did not respond in time/);
 });
 
-test('Gemini disconnecting mid-call, with nothing to resume from, ends it with the reason', async () => {
-  const r = rig();
+test('Gemini 1006 without a resume handle starts a safe fresh session instead of ending the call', async () => {
+  const fresh = new FakeSocket();
+  const r = rig({ more: [fresh] });
   await ready(r);
-  r.gemini.emit('close', { code: 1011, reason: 'internal' });
+  r.gemini.emit('close', { code: 1006, reason: '' });
+  await until(() => fresh.json.length > 0, 'fresh recovery setup');
+  assert.deepEqual(fresh.json[0].setup.sessionResumption, {});
+  assert.match(fresh.json[0].setup.systemInstruction.parts[0].text, /CONNECTION RECOVERY/);
+  fresh.receive({ setupComplete: {} });
+  await until(() => fresh.json.some((message) => message.realtimeInput?.text === 'INTERNAL RECOVERY CUE: the voice service briefly disconnected. Apologize once and ask the caller to repeat their last request.'), 'recovery prompt');
+  assert.equal(r.client.json.filter((message) => message.type === 'ready').length, 1);
+  assert.equal(r.client.json.some((message) => message.type === 'error' || message.type === 'ended'), false);
+  assert.equal(r.client.json.some((message) => message.type === 'interrupted'), true);
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(fresh.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('a provider drop during booking approval fails closed instead of starting a fresh model session', async () => {
+  const r = rig({ cal: [slots, booking] });
+  await ready(r);
+  const ref = await prepared(r);
+  say(r, 'Yes, that is all correct.');
+  r.gemini.receive(createCall(ref));
+  await until(() => r.client.json.some((message) => message.type === 'approval_request'), 'booking approval');
+  r.gemini.emit('close', { code: 1006, reason: '' });
   await r.done;
-  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
-  assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1011: internal\)/);
+  await wait(20);
+  assert.equal(r.connectedWith.length, 1, 'no fresh session was opened while a write may be unresolved');
+  assert.deepEqual(r.calRequests, ['GET /v2/slots'], 'the booking was not submitted without approval');
+  assert.match(r.client.json.find((message) => message.type === 'error').message, /may have been processing/);
 });
 
 const resumable = (r: Rig, handle = 'handle-1') => r.gemini.receive({ sessionResumptionUpdate: { newHandle: handle, resumable: true } });
@@ -619,19 +644,21 @@ test('when every reconnect attempt fails the call ends with an explanation', asy
   gemini.receive({ sessionResumptionUpdate: { newHandle: 'h', resumable: true } });
   gemini.emit('close', { code: 1006, reason: '' });
   await r.done;
-  assert.equal(connects, 3, 'the first connection plus two attempts');
+  assert.equal(connects, 4, 'the first connection, two resumption attempts, and one fresh fallback');
   assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1006\)/);
   assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
 });
 
 test('a replacement that never accepts its setup is dropped and the call fails clearly', async () => {
   const silent = new FakeSocket();
-  const r = rig({ more: [silent], limits: { maxReconnects: 1, setupTimeoutMs: 40 } });
+  const freshSilent = new FakeSocket();
+  const r = rig({ more: [silent, freshSilent], limits: { maxReconnects: 1, setupTimeoutMs: 40 } });
   await ready(r);
   resumable(r);
   r.gemini.emit('close', { code: 1011, reason: '' });
   await r.done;
   assert.ok(silent.closed, 'the silent replacement is closed');
+  assert.ok(freshSilent.closed, 'the unsuccessful fresh fallback is closed');
   assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored/);
 });
 

@@ -13,6 +13,7 @@ import {
   cleanPhone,
   cleanText,
   cleanTimeZone,
+  localDateRange,
   spellEmail,
   type CleanPhone,
 } from './validation.js';
@@ -64,7 +65,7 @@ export function buildSystemInstruction(config: ClinicConfig, now: Date, scheduli
   ].join('\n');
   return `You are ${config.personaName}, the ${template.label.toLowerCase()} receptionist for ${business}, on a live browser test call.
 Speak in this tone: ${config.tone}
-Current date and time: ${now.toISOString()} (UTC). The business time zone is ${config.timezone}; unless the caller names another zone, interpret times in the business's zone and pass it as time_zone.
+Current date and time: ${now.toISOString()} (UTC). In the business time zone (${config.timezone}), the local date and time is ${formatWhen(now, config.timezone)}. Unless the caller names another zone, interpret relative dates such as today and tomorrow using this business-local clock.
 SCHEDULING STATUS: ${schedulingText}
 Enabled actions: ${config.enabledActions.booking ? 'booking is enabled in settings' : 'booking is disabled in settings'}; ${config.enabledActions.take_messages ? 'messages are enabled' : 'messages are disabled'}; ${config.enabledActions.hand_off ? 'staff handoff is enabled' : 'staff handoff is disabled'}.
 ${actionText}
@@ -83,7 +84,7 @@ Greeting preference: ${config.greeting || 'Greet warmly and ask how you can help
 Speak naturally and briefly, one question at a time. Help with the business's listed services and ordinary administrative questions. Do not invent prices, policies, services, availability, opening hours, or claims. Never present yourself as a licensed professional or give advice outside the supplied information. Never say a booking or request was sent, confirmed, changed, or cancelled unless a tool result says so.
 
 BOOKING STATUS: ${bookingAvailable ? 'Booking tools are available.' : 'Do not call booking tools or imply that a booking can be made on this call.'}
-${bookingAvailable ? `BOOKING STEPS: ${config.bookingLanguage}\n${BOOKING_SAFETY_RULE}\n1. Ask what service, reservation, consultation, or visit they want, plus their name and preferred day/time.\n2. Call check_availability for the requested date and offer only times it returns.\n3. Ask only for contact details needed by the booking. Ask the caller to spell an email slowly, letter by letter, using "at" and "dot"; never guess or correct it.\n4. Call prepare_booking with every required detail. If it reports a problem, clarify with the caller and try again.\n5. Read back exactly what the tool returned, including the caller's name, requested service/purpose, time, phone digits, and spelled email. Ask "Is all of that correct?" and wait for the caller's answer.\n6. Only after their clear yes call create_booking with the booking_ref. If anything is corrected, prepare and read it back again.\n7. The browser must approve the booking before it is sent. Tell the caller it is confirmed only if the tool reports success; after any failure, explain it was not confirmed and offer an enabled alternative.\nFor rescheduling or cancelling, verify the existing booking reference and attendee email, read back the requested change, and wait for browser approval.` : ''}
+${bookingAvailable ? `BOOKING STEPS: ${config.bookingLanguage}\n${BOOKING_SAFETY_RULE}\n1. Ask what service, reservation, consultation, or visit they want, plus their name and preferred day/time.\n2. For a single requested day, call check_availability with that business-local calendar date as YYYY-MM-DD; the tool checks the full local day. For a date range, use date and end_date. Do not calculate UTC midnight boundaries yourself. If the caller named a specific time, still check the whole day, then offer only returned times.\n3. Ask only for contact details needed by the booking. Ask the caller to spell an email slowly, letter by letter, using "at" and "dot"; never guess or correct it.\n4. Call prepare_booking with every required detail and the exact start time returned by check_availability. If it reports a problem, clarify with the caller and try again.\n5. Read back exactly what the tool returned, including the caller's name, requested service/purpose, time, phone digits, and spelled email. Ask "Is all of that correct?" and wait for the caller's answer.\n6. Only after their clear yes call create_booking with the booking_ref. If anything is corrected, prepare and read it back again.\n7. The browser must approve the booking before it is sent. Tell the caller it is confirmed only if the tool reports success; after any failure, explain it was not confirmed and offer an enabled alternative.\nFor rescheduling or cancelling, verify the existing booking reference and attendee email, read back the requested change, and wait for browser approval.` : ''}
 `;
 }
 
@@ -94,15 +95,14 @@ const str = (description?: string) => ({ type: 'STRING' as const, ...(descriptio
 export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'check_availability',
-    description: 'Read available booking times in a bounded future date/time range.',
+    description: 'Read available booking times for one or more complete calendar dates in the saved business timezone.',
     parameters: {
       type: 'OBJECT',
       properties: {
-        start: str('ISO-8601 datetime with timezone.'),
-        end: str('ISO-8601 datetime with timezone, no more than 14 days after start.'),
-        time_zone: str('IANA timezone, such as America/Los_Angeles.'),
+        date: str('First requested business-local calendar date in YYYY-MM-DD format.'),
+        end_date: str('Optional last requested business-local calendar date in YYYY-MM-DD format; inclusive, at most 14 days total.'),
       },
-      required: ['start', 'end', 'time_zone'],
+      required: ['date'],
     },
   },
   {
@@ -219,6 +219,8 @@ export interface ToolDeps {
   gate: ApprovalGate;
   store: CallStore;
   now: () => Date;
+  /** Saved business timezone; production always supplies it so model-supplied zones cannot shift queries. */
+  businessTimeZone?: string;
   escalate: (reason: string) => Promise<void>;
   bookings: BookingMemory;
   /** What the caller has said since the last read-back began, waiting briefly for the transcription to arrive. */
@@ -266,16 +268,44 @@ function requireCal(deps: ToolDeps): CalComClient {
 }
 
 async function checkAvailability(deps: ToolDeps, args: Record<string, unknown>): Promise<ToolResult> {
-  let start = awareIso(args.start, 'start');
-  const end = awareIso(args.end, 'end');
+  const timeZone = cleanTimeZone(deps.businessTimeZone ?? args.time_zone);
+  const hasLocalDate = args.date !== undefined;
+  if (!hasLocalDate && args.end_date !== undefined) throw new ToolError('date is required when end_date is provided');
+  let start: Date;
+  let end: Date;
+  if (hasLocalDate) {
+    const range = localDateRange(args.date, args.end_date ?? args.date, timeZone);
+    start = range.start;
+    end = range.end;
+  } else {
+    start = awareIso(args.start, 'start');
+    end = awareIso(args.end, 'end');
+  }
   const now = deps.now();
   // Availability is read-only, so a start that has just slipped into the past is moved up to now.
   if (start < now && end > now) start = now;
-  if (start < now || end <= start || end.getTime() - start.getTime() > MAX_AVAILABILITY_WINDOW_MS) {
+  if (start < now || end <= start || (!hasLocalDate && end.getTime() - start.getTime() > MAX_AVAILABILITY_WINDOW_MS)) {
     throw new ToolError('Requested availability range must be future-dated and at most 14 days');
   }
-  const timeZone = cleanTimeZone(args.time_zone);
-  return { ok: true, availability: await requireCal(deps).availableSlots(start, end, timeZone) };
+  const data = await requireCal(deps).availableSlots(start, end, timeZone);
+  return { ok: true, availability: filterAvailability(data, start, end) };
+}
+
+function filterAvailability(data: unknown, start: Date, end: Date): Record<string, unknown[]> {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new CalComError('Cal.com returned an unexpected availability response; no times were offered');
+  const filtered: Record<string, unknown[]> = {};
+  for (const [date, value] of Object.entries(data as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Array.isArray(value)) throw new CalComError('Cal.com returned an unexpected availability response; no times were offered');
+    const kept: unknown[] = [];
+    for (const slot of value) {
+      const raw = typeof slot === 'string' ? slot : slot && typeof slot === 'object' ? (slot as { start?: unknown }).start : undefined;
+      const timestamp = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+      if (!Number.isFinite(timestamp)) throw new CalComError('Cal.com returned an unexpected availability response; no times were offered');
+      if (timestamp >= start.getTime() && timestamp < end.getTime()) kept.push(slot);
+    }
+    if (kept.length) filtered[date] = kept;
+  }
+  return filtered;
 }
 
 /** The start times in a Cal.com slots answer, or null when the answer is not in a shape we recognise. */
@@ -299,7 +329,7 @@ async function requireOfferedSlot(deps: ToolDeps, cal: CalComClient, start: Date
   const around = 3 * 60 * 60 * 1000;
   const from = new Date(Math.max(deps.now().getTime(), start.getTime() - around));
   const times = slotStarts(await cal.availableSlots(from, new Date(start.getTime() + around), timeZone));
-  if (times === null) return;
+  if (times === null) throw new CalComError('Cal.com returned an unexpected availability response; the booking was not submitted');
   if (times.some((time) => Math.abs(time - start.getTime()) < 60_000)) return;
   const near = times.sort((x, y) => Math.abs(x - start.getTime()) - Math.abs(y - start.getTime())).slice(0, 5).sort((x, y) => x - y);
   throw new ToolError(near.length
@@ -308,7 +338,7 @@ async function requireOfferedSlot(deps: ToolDeps, cal: CalComClient, start: Date
 }
 
 async function prepareBooking(deps: ToolDeps, args: Record<string, unknown>): Promise<ToolResult> {
-  const timeZone = cleanTimeZone(args.time_zone);
+  const timeZone = cleanTimeZone(deps.businessTimeZone ?? args.time_zone);
   const name = cleanPersonName(args.caller_name);
   const email = cleanEmail(args.caller_email);
   const phone = args.caller_phone === undefined || args.caller_phone === null || args.caller_phone === '' ? null : cleanPhone(args.caller_phone, timeZone);
@@ -404,7 +434,7 @@ async function rescheduleBooking(deps: ToolDeps, args: Record<string, unknown>):
   const uid = cleanBookingUid(args.booking_uid);
   const email = cleanEmail(args.caller_email);
   const newStart = awareIso(args.new_start, 'new_start');
-  const timeZone = cleanTimeZone(args.time_zone);
+  const timeZone = cleanTimeZone(deps.businessTimeZone ?? args.time_zone);
   if (newStart <= deps.now()) throw new ToolError('New booking time must be in the future');
   const cal = requireCal(deps);
   await cal.requireAttendeeIdentity(uid, email);

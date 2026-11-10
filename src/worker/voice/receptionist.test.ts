@@ -22,6 +22,7 @@ function makeStore() {
 interface Harness {
   deps: ToolDeps;
   requests: string[];
+  requestUrls: URL[];
   prompts: Array<{ operation: string; summary: Record<string, string> }>;
   log: Array<[string, unknown]>;
   escalations: string[];
@@ -33,9 +34,12 @@ interface Harness {
 
 function harness(options: { responses?: unknown[]; cal?: boolean; autoApprove?: boolean | null } = {}): Harness {
   const requests: string[] = [];
+  const requestUrls: URL[] = [];
   const queue = [...(options.responses ?? [])];
   const fetcher: Fetcher = async (input, init) => {
-    requests.push(`${init?.method ?? 'GET'} ${new URL(input).pathname}`);
+    const url = new URL(input);
+    requests.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+    requestUrls.push(url);
     const next = queue.shift();
     return new Response(JSON.stringify(next ?? { status: 'error' }), { status: next ? 200 : 500 });
   };
@@ -64,7 +68,7 @@ function harness(options: { responses?: unknown[]; cal?: boolean; autoApprove?: 
       note: (text) => { notes.push(text); },
       setCallerName: () => undefined,
     },
-    requests, prompts, log, escalations, notes, caller,
+    requests, requestUrls, prompts, log, escalations, notes, caller,
     answerNext(approved) { if (nextApproval) gate.answer(nextApproval, approved); },
   };
 }
@@ -74,6 +78,7 @@ const booked = { status: 'success', data: { uid: 'new-uid-99', status: 'accepted
 
 test('the model is offered exactly the receptionist tools', () => {
   assert.deepEqual(TOOL_DECLARATIONS.map((tool) => tool.name), ['check_availability', 'prepare_booking', 'create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
+  assert.deepEqual(TOOL_DECLARATIONS[0].parameters.required, ['date']);
   for (const tool of TOOL_DECLARATIONS) assert.ok(tool.parameters.required.every((name) => name in tool.parameters.properties));
 });
 
@@ -100,6 +105,7 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /the dental receptionist for Northside Dental/);
   assert.match(prompt, /2026-11-02T03:00:00\.000Z/);
   assert.match(prompt, /America\/Chicago/);
+  assert.match(prompt, /local date and time is Sunday, November 1, 2026 at 9:00 PM/);
   assert.match(prompt, /Open 8-5\./);
   assert.match(prompt, /Q: Parking\?\nA: Free\./);
   assert.match(prompt, /Welcome!/);
@@ -141,6 +147,22 @@ test('availability whose start just passed is moved up to now', async () => {
   assert.equal(result.ok, true);
 });
 
+test('availability uses the full business-local day and the saved timezone, not model UTC bounds', async () => {
+  const h = harness({ responses: [{ status: 'success', data: {
+    '2026-11-01': [{ start: '2026-11-01T17:00:00-08:00', end: '2026-11-01T17:30:00-08:00' }],
+    '2026-11-02': [{ start: '2026-11-02T08:00:00Z', end: '2026-11-02T08:30:00Z' }],
+  } }] });
+  h.deps.now = () => new Date('2026-10-31T12:00:00Z');
+  h.deps.businessTimeZone = 'America/Los_Angeles';
+  const result = await runTool(h.deps, 'check_availability', { date: '2026-11-01', time_zone: 'UTC' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.availability, { '2026-11-01': [{ start: '2026-11-01T17:00:00-08:00', end: '2026-11-01T17:30:00-08:00' }] });
+  assert.equal(h.requestUrls[0]!.searchParams.get('start'), '2026-11-01T07:00:00Z');
+  assert.equal(h.requestUrls[0]!.searchParams.get('end'), '2026-11-02T08:00:00Z');
+  assert.equal(h.requestUrls[0]!.searchParams.get('timeZone'), 'America/Los_Angeles');
+  assert.equal(h.requestUrls[0]!.searchParams.get('format'), 'range');
+});
+
 const slots = { status: 'success', data: { '2026-11-05': [{ start: '2026-11-05T09:00:00Z', end: '2026-11-05T09:30:00Z' }, { start: '2026-11-05T11:00:00Z', end: '2026-11-05T11:30:00Z' }] } };
 const details = { caller_name: 'Ada Lovelace', caller_email: 'Ada@Example.com', caller_phone: '+1 415 555 0123', request_details: 'Cleaning', start: '2026-11-05T09:00:00Z', time_zone: 'UTC' };
 
@@ -173,6 +195,14 @@ test('a time that is not free is refused with the nearest free times', async () 
   const result = await runTool(h.deps, 'prepare_booking', { ...details, start: '2026-11-05T09:15:00Z' });
   assert.equal(result.ok, false);
   assert.match(String(result.message), /Nearby times that are: Thursday, November 5, 2026 at 9:00 AM; Thursday, November 5, 2026 at 11:00 AM/);
+});
+
+test('an unrecognized Cal.com slot response is not treated as empty availability or booked through', async () => {
+  const h = harness({ responses: [{ status: 'success', data: { '2026-11-05': ['not-a-time'] } }] });
+  const result = await runTool(h.deps, 'prepare_booking', details);
+  assert.equal(result.ok, false);
+  assert.match(String(result.message), /unexpected availability response/);
+  assert.deepEqual(h.prompts, []);
 });
 
 test('booking waits for a clear yes, then needs browser approval, then records the appointment', async () => {

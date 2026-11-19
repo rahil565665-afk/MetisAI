@@ -48,6 +48,8 @@ function makeStore(options: { createProblem?: string; updateFails?: boolean } = 
 interface Rig {
   client: FakeSocket;
   gemini: FakeSocket;
+  transcriber: FakeSocket | null;
+  transcriberConnections: FakeSocket[];
   session: VoiceSession;
   done: Promise<void>;
   calls: Array<[string, any]>;
@@ -55,7 +57,7 @@ interface Rig {
   connectedWith: string[];
 }
 
-function rig(options: { createProblem?: string; updateFails?: boolean; scheduling?: PreparedSession['scheduling']; cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; more?: FakeSocket[]; approvalTimeoutMs?: number } = {}): Rig {
+function rig(options: { createProblem?: string; updateFails?: boolean; scheduling?: PreparedSession['scheduling']; cal?: Array<unknown>; limits?: SessionDeps['limits']; prepare?: () => Promise<PreparedSession>; connect?: () => Promise<VoiceSocket>; more?: FakeSocket[]; transcriber?: FakeSocket; moreTranscribers?: FakeSocket[]; approvalTimeoutMs?: number } = {}): Rig {
   const client = new FakeSocket();
   const gemini = new FakeSocket();
   const { store, calls } = makeStore(options);
@@ -66,12 +68,21 @@ function rig(options: { createProblem?: string; updateFails?: boolean; schedulin
     const next = queue.shift();
     return new Response(JSON.stringify(next ?? { status: 'error' }), { status: next ? 200 : 500 });
   };
-  const config = normalizeClinicConfig({ id: 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4', name: 'Northside Dental', timezone: 'UTC', receptionist_config: { greeting: 'Welcome!' } });
+  const config = normalizeClinicConfig({ id: 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4', name: 'Northside Dental', business_type: 'dental_clinic', timezone: 'UTC', receptionist_config: { greeting: 'Welcome!' } });
   const connectedWith: string[] = [];
+  const transcriberConnections = [options.transcriber, ...(options.moreTranscribers ?? [])].filter((socket): socket is FakeSocket => Boolean(socket));
   const session = new VoiceSession({
     client,
     prepare: options.prepare ?? (async () => ({ config, geminiApiKey: 'gem-key', cal: CalComClient.create({ event_type_id: 9 }, 'k', { fetcher }), calError: null, store, scheduling: options.scheduling })),
     connectGemini: options.connect ?? (async (key) => { connectedWith.push(key); return connectedWith.length === 1 ? gemini : (options.more?.shift() ?? gemini); }),
+    ...(options.transcriber ? {
+      connectTranscriber: async () => {
+        const next = transcriberConnections.shift();
+        if (!next) throw new SessionStartError('Transcriber test connection unavailable');
+        return next;
+      },
+      transcriptionLanguageCodes: ['en-IN', 'hi-IN'],
+    } : {}),
     model: 'models/test-live',
     voiceName: 'Puck',
     now: () => NOW,
@@ -79,12 +90,14 @@ function rig(options: { createProblem?: string; updateFails?: boolean; schedulin
     approvalTimeoutMs: options.approvalTimeoutMs ?? 2000,
     newApprovalId: (() => { let n = 0; return () => `approval-${++n}`; })(),
   });
-  return { client, gemini, session, done: session.run(), calls, calRequests, connectedWith };
+  return { client, gemini, transcriber: options.transcriber ?? null, transcriberConnections, session, done: session.run(), calls, calRequests, connectedWith };
 }
 
 async function ready(r: Rig) {
   await until(() => r.gemini.json.length > 0, 'setup message');
+  if (r.transcriber) await until(() => r.transcriber!.json.some((message) => message.setup), 'transcriber setup message');
   r.gemini.receive({ setupComplete: {} });
+  r.transcriber?.receive({ setupComplete: {} });
   await until(() => r.client.json.some((message) => message.type === 'ready'), 'ready');
 }
 
@@ -107,6 +120,69 @@ test('connects with the clinic key, sends setup, then greets once Gemini is read
   assert.match(r.gemini.json[1].realtimeInput.text, /Greet them now/);
   r.client.emit('close', { code: 1000, reason: '' });
   await r.done;
+});
+
+test('dedicated Transcribe Live drives final caller captions while Gemini handles spoken conversation', async () => {
+  const recognizer = new FakeSocket();
+  const r = rig({ transcriber: recognizer });
+  await ready(r);
+  const setup = recognizer.json[0].setup;
+  assert.equal(setup.model, 'models/gemini-3.5-transcribe-live');
+  assert.deepEqual(setup.generationConfig.responseModalities, ['TEXT']);
+  assert.deepEqual(setup.inputAudioTranscription.languageCodes, ['en-IN', 'hi-IN']);
+  assert.equal(setup.inputAudioTranscription.mode, 'VERBATIM');
+  assert.ok(setup.inputAudioTranscription.customVocabulary.includes('Northside Dental'));
+  assert.ok(setup.inputAudioTranscription.customVocabulary.includes('root canal'));
+
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 0, 'raw audio is not sent through a second speech recognizer');
+  assert.equal(recognizer.json.filter((message) => message.realtimeInput?.audio).length, 1, 'the microphone frame reaches the dedicated ASR stream');
+
+  r.gemini.receive({ serverContent: { inputTranscription: { text: 'poor native transcript' } } });
+  assert.equal(r.client.json.some((message) => message.type === 'transcript' && message.role === 'user' && message.text.includes('poor native')), false, 'native transcript is suppressed while the dedicated ASR is healthy');
+
+  recognizer.receive({ serverContent: { interimInputTranscription: { text: 'My name is Rah' } } });
+  assert.deepEqual(r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1), {
+    type: 'transcript', role: 'user', text: 'My name is Rah', final: false,
+  });
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'My name is Rahil Khan.' } } });
+  assert.deepEqual(r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1), {
+    type: 'transcript', role: 'user', text: 'My name is Rahil Khan.', final: true,
+  });
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.text === 'My name is Rahil Khan.').length, 1, 'the exact ASR final is passed to the voice agent as caller text');
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'My date of birth is 12th of May 2005 and the reason is a routine checkup.' } } });
+  const protectedCaption = r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1);
+  assert.match(protectedCaption.text, /\[date of birth omitted\]/);
+  assert.equal(protectedCaption.text.includes('2005'), false);
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+  const saved = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1].metadata.transcript;
+  assert.ok(saved.some((turn: { role: string; text: string }) => turn.role === 'user' && turn.text === 'My name is Rahil Khan.'));
+  assert.equal(saved.some((turn: { role: string; text: string }) => turn.text.includes('poor native')), false);
+});
+
+test('a Transcribe Live disconnect falls back and reconnects without ending the live call', async () => {
+  const first = new FakeSocket();
+  const replacement = new FakeSocket();
+  const r = rig({ transcriber: first, moreTranscribers: [replacement] });
+  await ready(r);
+  first.emit('close', { code: 1006, reason: '' });
+  await until(() => replacement.json.some((message) => message.setup), 'replacement transcription setup');
+  assert.equal(r.session.active, true);
+  assert.equal(r.client.json.some((message) => message.type === 'ended' || message.type === 'error'), false);
+
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1, 'native audio remains the fallback while ASR is reconnecting');
+  assert.equal(replacement.json.filter((message) => message.realtimeInput?.audio).length, 0, 'do not send audio until the replacement recognizer accepts setup');
+  r.gemini.receive({ serverContent: { inputTranscription: { text: 'fallback transcript' } } });
+  assert.equal(r.client.json.some((message) => message.type === 'transcript' && message.text === 'fallback transcript'), true);
+
+  replacement.receive({ setupComplete: {} });
+  r.client.emit('message', { data: pcm(1600) });
+  assert.equal(replacement.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1, 'after recovery, the voice agent receives text rather than duplicate raw audio');
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
 });
 
 test('microphone audio is forwarded only once ready, and Gemini audio comes back as binary', async () => {
@@ -483,11 +559,23 @@ test('the time limit and the idle limit end the call', async () => {
   assert.deepEqual(idle.client.json.at(-1), { type: 'ended', reason: 'idle' });
 });
 
-test('speech keeps an otherwise quiet call alive', async () => {
+test('speech transcripts keep an otherwise quiet call alive', async () => {
   const r = rig({ limits: { maxDurationMs: 60_000, idleMs: 80 } });
   await ready(r);
   for (let index = 0; index < 6; index += 1) {
     r.gemini.receive({ serverContent: { inputTranscription: { text: 'x' } } });
+    await wait(25);
+  }
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('microphone speech energy keeps a call alive even while transcription is delayed', async () => {
+  const r = rig({ limits: { maxDurationMs: 60_000, idleMs: 80 } });
+  await ready(r);
+  const speech = new Int16Array(800).fill(8192).buffer;
+  for (let index = 0; index < 6; index += 1) {
+    r.client.emit('message', { data: speech });
     await wait(25);
   }
   assert.equal(r.session.active, true);
@@ -573,16 +661,16 @@ test('a provider drop during booking approval fails closed instead of starting a
 
 const resumable = (r: Rig, handle = 'handle-1') => r.gemini.receive({ sessionResumptionUpdate: { newHandle: handle, resumable: true } });
 
-test('a dropped connection is resumed with the latest handle, without a second greeting or ready', async () => {
+test('a non-resumable update clears an expired handle before recovery', async () => {
   const second = new FakeSocket();
-  const r = rig({ more: [second] });
+  const r = rig({ more: [second], limits: { maxReconnects: 1, maxFreshReconnects: 1 } });
   await ready(r);
   resumable(r);
   r.gemini.receive({ sessionResumptionUpdate: { resumable: false } });
   r.gemini.emit('close', { code: 1011, reason: 'internal' });
 
-  await until(() => second.json.length > 0, 'resume setup');
-  assert.deepEqual(second.json[0].setup.sessionResumption, { handle: 'handle-1' });
+  await until(() => second.json.length > 0, 'fresh recovery setup');
+  assert.deepEqual(second.json[0].setup.sessionResumption, {});
   const notices = () => r.client.json.filter((message) => message.type === 'notice').map((message) => message.message);
   assert.match(notices().at(-1), /Reconnecting/);
   r.client.emit('message', { data: pcm(1600) });
@@ -591,7 +679,8 @@ test('a dropped connection is resumed with the latest handle, without a second g
   second.receive({ setupComplete: {} });
   await until(() => notices().at(-1) === '', 'reconnect banner cleared');
   assert.equal(r.client.json.filter((message) => message.type === 'ready').length, 1);
-  assert.equal(second.json.length, 1, 'no second greeting is requested');
+  assert.equal(second.json.some((message) => message.realtimeInput?.text?.includes('Greet them now')), false, 'recovery does not repeat the original greeting');
+  assert.equal(second.json.filter((message) => message.realtimeInput?.text?.includes('INTERNAL RECOVERY CUE')).length, 1, 'the caller is asked to repeat only when prior context cannot be resumed');
   r.client.emit('message', { data: pcm(1600) });
   assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 1);
   second.receive(audioFrom([5, 6]));
@@ -644,7 +733,7 @@ test('when every reconnect attempt fails the call ends with an explanation', asy
   gemini.receive({ sessionResumptionUpdate: { newHandle: 'h', resumable: true } });
   gemini.emit('close', { code: 1006, reason: '' });
   await r.done;
-  assert.equal(connects, 4, 'the first connection, two resumption attempts, and one fresh fallback');
+  assert.equal(connects, 5, 'the first connection, two resumption attempts, and two fresh recovery attempts');
   assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1006\)/);
   assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
 });
@@ -652,7 +741,7 @@ test('when every reconnect attempt fails the call ends with an explanation', asy
 test('a replacement that never accepts its setup is dropped and the call fails clearly', async () => {
   const silent = new FakeSocket();
   const freshSilent = new FakeSocket();
-  const r = rig({ more: [silent, freshSilent], limits: { maxReconnects: 1, setupTimeoutMs: 40 } });
+  const r = rig({ more: [silent, freshSilent], limits: { maxReconnects: 1, maxFreshReconnects: 1, setupTimeoutMs: 40 } });
   await ready(r);
   resumable(r);
   r.gemini.emit('close', { code: 1011, reason: '' });

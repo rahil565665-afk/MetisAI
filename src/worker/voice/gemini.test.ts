@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   DEFAULT_GEMINI_LIVE_MODEL,
+  DEFAULT_LANGUAGE_CODE,
+  DEFAULT_TRANSCRIBER_MODEL,
   DEFAULT_VOICE_NAME,
   audioChunkMessage,
   geminiLiveUrl,
@@ -10,6 +12,7 @@ import {
   safeProviderText,
   setupMessage,
   textInputMessage,
+  transcriptionSetupMessage,
   toolResponseMessage,
 } from './gemini.js';
 
@@ -27,8 +30,9 @@ test('setup message nests generation settings under generationConfig', () => {
   assert.deepEqual(message.setup.generationConfig.responseModalities, ['AUDIO']);
   assert.equal(message.setup.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, 'Puck');
   assert.equal(message.setup.systemInstruction.parts[0].text, 'be nice');
-  assert.deepEqual(message.setup.inputAudioTranscription, {});
-  assert.deepEqual(message.setup.outputAudioTranscription, {});
+  assert.deepEqual(message.setup.inputAudioTranscription, { languageCodes: [DEFAULT_LANGUAGE_CODE] });
+  assert.deepEqual(message.setup.outputAudioTranscription, { languageCodes: [DEFAULT_LANGUAGE_CODE] });
+  assert.equal(message.setup.generationConfig.speechConfig.languageCode, DEFAULT_LANGUAGE_CODE);
   assert.equal(message.setup.responseModalities, undefined);
 });
 
@@ -44,6 +48,18 @@ test('long-call settings are on by default, carry a resume handle, and can be le
   assert.equal(plain.setup.contextWindowCompression, undefined);
 });
 
+test('the dedicated Transcribe Live setup requests verbatim text with language and business vocabulary', () => {
+  const setup = transcriptionSetupMessage({ languageCodes: ['en-IN', 'hi-IN'], customVocabulary: ['Northside Dental', 'routine checkup'] }) as { setup: Record<string, any> };
+  assert.equal(setup.setup.model, DEFAULT_TRANSCRIBER_MODEL);
+  assert.deepEqual(setup.setup.generationConfig.responseModalities, ['TEXT']);
+  assert.deepEqual(setup.setup.inputAudioTranscription, {
+    languageCodes: ['en-IN', 'hi-IN'],
+    customVocabulary: ['Northside Dental', 'routine checkup'],
+    mode: 'VERBATIM',
+  });
+  assert.equal(setup.setup.tools, undefined);
+});
+
 test('client message builders match the wire format', () => {
   assert.deepEqual(audioChunkMessage('AAAA'), { realtimeInput: { audio: { data: 'AAAA', mimeType: 'audio/pcm;rate=16000' } } });
   assert.deepEqual(textInputMessage('hi'), { realtimeInput: { text: 'hi' } });
@@ -55,12 +71,13 @@ test('setupComplete, audio, transcripts and turnComplete arrive in handling orde
     serverContent: {
       interrupted: true,
       modelTurn: { parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: b64([1, 2]) } }] },
+      interimInputTranscription: { text: 'hel' },
       inputTranscription: { text: 'hello' },
       outputTranscription: { text: 'hi there' },
       turnComplete: true,
     },
   });
-  assert.deepEqual(parseServerMessage(frame).map((event) => event.kind), ['interrupted', 'audio', 'inputTranscript', 'outputTranscript', 'turnComplete']);
+  assert.deepEqual(parseServerMessage(frame).map((event) => event.kind), ['interrupted', 'audio', 'interimInputTranscript', 'inputTranscript', 'outputTranscript', 'turnComplete']);
   assert.deepEqual(parseServerMessage('{"setupComplete":{}}'), [{ kind: 'setupComplete' }]);
 });
 
@@ -100,9 +117,9 @@ test('errors, goAway and garbage', () => {
 });
 
 test('model and voice overrides are validated', () => {
-  assert.deepEqual(geminiSettings({}), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME });
-  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'models/gemini-next-live', GEMINI_VOICE_NAME: 'Puck' }), { model: 'models/gemini-next-live', voiceName: 'Puck' });
-  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'gemini-without-prefix', GEMINI_VOICE_NAME: 'not a voice!' }), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME });
+  assert.deepEqual(geminiSettings({}), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [] });
+  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'models/gemini-next-live', GEMINI_VOICE_NAME: 'Puck', GEMINI_LANGUAGE_CODE: 'en-US', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,es-US' }), { model: 'models/gemini-next-live', voiceName: 'Puck', languageCode: 'en-US', transcriptionLanguageCodes: ['en-US', 'es-US'] });
+  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'gemini-without-prefix', GEMINI_VOICE_NAME: 'not a voice!', GEMINI_LANGUAGE_CODE: 'not a language!', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,invalid code' }), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [] });
 });
 
 test('resumption updates carry the newest handle, and only count as resumable with one', () => {

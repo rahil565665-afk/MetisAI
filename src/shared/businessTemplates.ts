@@ -23,7 +23,7 @@ const bookingRule = 'When booking is enabled and scheduling is available, check 
 export const BUSINESS_TEMPLATES: Record<BusinessTemplateId, BusinessTemplate> = {
   dental: {
     id: 'dental', label: 'Dental', descriptor: 'Dental office or oral-care practice',
-    greeting: 'Thank you for calling. This is {{persona_name}}. How can I help you today?', personaName: 'Avery', tone: 'Warm, reassuring, professional, and concise.',
+    greeting: 'Hi, you’ve reached {{business_name}}. How can I help you today?', personaName: 'Avery', tone: 'Warm, reassuring, professional, and concise.',
     services: ['Cleanings and checkups', 'Dental consultations', 'Appointment changes'], openingHours: notSet,
     safetyRules: 'Do not diagnose, recommend treatment, or say urgent symptoms are safe. For urgent or potentially life-threatening symptoms, advise contacting emergency services; otherwise offer prompt staff follow-up. Never ask for date of birth, insurance details, payment-card details, or unnecessary medical details.',
     bookingLanguage: 'Call a booking an appointment. Ask for the reason for the visit without asking for unnecessary medical details.',

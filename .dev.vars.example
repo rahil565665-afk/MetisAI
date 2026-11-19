@@ -5,6 +5,12 @@ DASHBOARD_SESSION_SECRET=replace-with-64-hex-random-key
 TENANT_CREDENTIALS_ENCRYPTION_KEY=replace-with-64-hex-random-key
 APP_PUBLIC_URL=http://localhost:8787
 
-# Optional: override the Gemini Live model or voice (see docs/provider-references.md).
+# Optional: override the Gemini Live model, voice, or BCP-47 language hint.
+# Defaults: models/gemini-3.8-live, Sulafat (warm), and en-IN (Indian English).
+# Set GEMINI_LANGUAGE_CODE to match the primary caller language, e.g. en-US, hi-IN, ta-IN.
 # GEMINI_LIVE_MODEL=models/gemini-3.8-live
-# GEMINI_VOICE_NAME=Charon
+# GEMINI_VOICE_NAME=Sulafat
+# Voice language, such as en-IN or hi-IN:
+# GEMINI_LANGUAGE_CODE=en-IN
+# Optional Transcribe Live recognition-language hints, comma-separated. Leave unset for auto-detection.
+# Example for bilingual callers: GEMINI_TRANSCRIPTION_LANGUAGE_CODES=en-IN,hi-IN

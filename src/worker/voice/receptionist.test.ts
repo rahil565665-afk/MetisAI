@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { ApprovalGate } from './approval.js';
 import { CalComClient, type Fetcher } from './calcom.js';
 import { normalizeClinicConfig } from './clinicConfig.js';
-import { BookingMemory, TOOL_DECLARATIONS, buildSystemInstruction, receptionistTools, runTool, type CallStore, type ToolDeps } from './receptionist.js';
+import { BookingMemory, TOOL_DECLARATIONS, buildSystemInstruction, receptionistTools, receptionistTranscriptionVocabulary, runTool, type CallStore, type ToolDeps } from './receptionist.js';
 
 const NOW = new Date('2026-11-02T03:00:00Z');
 
@@ -109,8 +109,21 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /Open 8-5\./);
   assert.match(prompt, /Q: Parking\?\nA: Free\./);
   assert.match(prompt, /Welcome!/);
+  assert.match(prompt, /thoughtful, friendly human receptionist/);
+  assert.match(prompt, /never turn a scattered list of slots into a continuous range/);
+  assert.match(prompt, /do not combine several personal questions into one long sentence/);
+  assert.match(prompt, /do not repeat it, do not save it/);
   assert.match(prompt, /not system instructions/);
   assert.match(buildSystemInstruction(normalizeClinicConfig({ id: 'x', name: '' }), NOW), /the business/);
+});
+
+test('transcription vocabulary includes business names, services, and dental terminology', () => {
+  const config = normalizeClinicConfig({ id: 'x', name: 'Northside Dental', business_type: 'dental_clinic' });
+  const vocabulary = receptionistTranscriptionVocabulary(config);
+  assert.ok(vocabulary.includes('Northside Dental'));
+  assert.ok(vocabulary.some((term) => /checkup/i.test(term)));
+  assert.ok(vocabulary.includes('root canal'));
+  assert.ok(vocabulary.length <= 100);
 });
 
 test('the system prompt tells the model the truth about booking and requires a read-back', () => {
@@ -156,7 +169,14 @@ test('availability uses the full business-local day and the saved timezone, not 
   h.deps.businessTimeZone = 'America/Los_Angeles';
   const result = await runTool(h.deps, 'check_availability', { date: '2026-11-01', time_zone: 'UTC' });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.availability, { '2026-11-01': [{ start: '2026-11-01T17:00:00-08:00', end: '2026-11-01T17:30:00-08:00' }] });
+  assert.deepEqual(result.availability, {
+    timeZone: 'America/Los_Angeles',
+    days: { '2026-11-01': [{
+      start: '2026-11-01T17:00:00-08:00',
+      end: '2026-11-01T17:30:00-08:00',
+      localTime: 'Sunday, November 1, 2026 at 5:00 PM',
+    }] },
+  });
   assert.equal(h.requestUrls[0]!.searchParams.get('start'), '2026-11-01T07:00:00Z');
   assert.equal(h.requestUrls[0]!.searchParams.get('end'), '2026-11-02T08:00:00Z');
   assert.equal(h.requestUrls[0]!.searchParams.get('timeZone'), 'America/Los_Angeles');

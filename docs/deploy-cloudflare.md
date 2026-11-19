@@ -44,11 +44,19 @@ Secrets are kept across deployments. `wrangler.jsonc` only sets the non-secret `
 
 **Make all four *Secret*, not *Text*.** A deploy replaces a Worker's variables with the ones in `wrangler.jsonc`, which would delete any dashboard variable of type *Text*. This repository sets `keep_vars: true` so a deploy leaves dashboard variables alone, but Secret is still the right type, because it is never shown or deleted. **Never regenerate `TENANT_CREDENTIALS_ENCRYPTION_KEY` once businesses have saved keys**: keys saved under the old value can no longer be read.
 
-Optional plain-text variables (Settings → Variables, type **Text**), only if Google changes the Live API: `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`) and `GEMINI_VOICE_NAME` (default `Charon`). Invalid values are ignored with the default used instead.
+Optional plain-text variables (Settings → Variables, type **Text**) for the voice runtime:
+- `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`)
+- `GEMINI_VOICE_NAME` (default `Sulafat`, Google's warm voice preset)
+- `GEMINI_LANGUAGE_CODE` (default `en-IN`; controls the generated assistant speech language).
+- `GEMINI_TRANSCRIPTION_LANGUAGE_CODES` (optional comma-separated BCP-47 hints for caller speech, such as `en-IN,hi-IN`; leave unset for automatic language detection).
+
+Caller audio is transcribed by a separate `gemini-3.5-transcribe-live` stream using verbatim mode and up to 100 business-specific vocabulary terms. Final recognized text is passed into `gemini-3.8-live` for reasoning and natural spoken replies; raw audio is sent to the conversational model only as a fallback while the dedicated recognizer is unavailable. The transcription stream reconnects independently and cannot end an otherwise active call.
+
+Invalid model, voice, or language values are ignored and the defaults are used instead.
 
 ## 4. Sign in and create a business
 
-1. In Supabase, create a project for the business. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console will not store it. A project that already has tables from an earlier version works as it is: the Worker repairs the old link when it first needs to.
+1. In Supabase, create a project for the business. Open **SQL Editor → New query**, paste the whole of `supabase/clinic-schema.sql` from this repository, and **Run** it (safe to run again). The schema creates `call_logs`, `receptionist_patients`, and `receptionist_appointments`; re-run the updated file on an existing clinic project when upgrading so the patient table and appointment link are added. Then copy the project's URL (`https://<ref>.supabase.co`) and its **secret** key from *Project Settings → API Keys* (it starts `sb_secret_`; an older project's `service_role` key also works). Never use the publishable / anon key; the console will not store it. A project that already has tables from an earlier version works as it is: the Worker repairs the old link when it first needs to.
 2. Open the Worker URL and sign in with `DASHBOARD_ADMIN_PASSCODE`.
 3. Choose **Add business receptionist**, enter a business name, and select Dental, Salon/Spa, Medical, Legal, Restaurant, Home services, Fitness, or General. Only the name is required. Each template supplies editable starter instructions; under **Reception setup**, tailor its persona, tone, services, hours, safety rules, FAQs, and enabled actions. See [Create your first receptionist](first-receptionist.md) for the practical setup checklist.
 4. Connect the business's Supabase URL and secret key if you want call history to be saved, and add its Gemini API key to enable the voice test. Booking is optional: to enable it, turn on **Booking** in Reception setup and configure the Cal.com API key plus either an event link (for example `https://cal.com/your-name/30min`) or its numeric event type ID. A missing or rejected provider never blocks business creation; the console reports problems under Integrations.

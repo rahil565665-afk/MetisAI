@@ -115,7 +115,7 @@ async function withLegacyLink<T extends { error: DatabaseErrorLike | null }>(db:
 }
 
 /**
- * Prove the connection end to end: write a throw-away row, delete it, and read the appointments table.
+ * Prove the connection end to end: write a throw-away row, delete it, and read the patient and appointment tables.
  * Throws a 400 whose message says exactly what to fix.
  */
 export async function checkClinicDatabase(db: SupabaseClient, tenantId: string): Promise<void> {
@@ -126,7 +126,9 @@ export async function checkClinicDatabase(db: SupabaseClient, tenantId: string):
   if (inserted.error || !inserted.data) throw new HttpError(400, describeDatabaseError(inserted.error, inserted.status));
   const removed = await db.from('call_logs').delete().eq('id', (inserted.data as { id: string }).id);
   if (removed.error) console.warn('[clinic-db] could not remove the connection-test row');
-  const appointments = await db.from('receptionist_appointments').select('id').limit(1);
+  const patients = await db.from('receptionist_patients').select('id').limit(1);
+  if (patients.error) throw new HttpError(400, describeDatabaseError(patients.error, patients.status));
+  const appointments = await db.from('receptionist_appointments').select('id,patient_id').limit(1);
   if (appointments.error) throw new HttpError(400, describeDatabaseError(appointments.error, appointments.status));
 }
 

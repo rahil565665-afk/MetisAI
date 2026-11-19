@@ -70,12 +70,19 @@ http.createServer((req, res) => {
         const bad = rows.find((row) => !tables.companies.some((company) => company.id === row.tenant_id));
         return send(409, { code: '23503', message: `insert or update on table "${match[1]}" violates foreign key constraint "${match[1]}_tenant_id_fkey"`, details: `Key (tenant_id)=(${bad.tenant_id}) is not present in table "companies".`, hint: null });
       }
+      const savedRows = [];
       for (const row of rows) {
         const keys = onConflict ? onConflict.split(',') : null;
         const existing = keys ? table.find((item) => keys.every((k) => item[k] === row[k])) : undefined;
-        if (existing) Object.assign(existing, row, { id: existing.id }); else table.push(row);
+        if (existing) {
+          Object.assign(existing, row, { id: existing.id });
+          savedRows.push(existing);
+        } else {
+          table.push(row);
+          savedRows.push(row);
+        }
       }
-      return prefer.includes('return=representation') ? send(201, project(rows, select)) : send(201, undefined);
+      return prefer.includes('return=representation') ? send(201, project(savedRows, select)) : send(201, undefined);
     }
     if (req.method === 'PATCH') {
       const rows = filterRows(table, filters);

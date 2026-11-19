@@ -47,7 +47,10 @@ Secrets are kept across deployments. `wrangler.jsonc` only sets the non-secret `
 Optional plain-text variables (Settings → Variables, type **Text**) for the voice runtime:
 - `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`)
 - `GEMINI_VOICE_NAME` (default `Sulafat`, Google's warm voice preset)
-- `GEMINI_LANGUAGE_CODE` (default `en-IN`, a BCP-47 language hint for speech recognition and generated speech; set this to the main callers' language, such as `en-US` or `hi-IN`).
+- `GEMINI_LANGUAGE_CODE` (default `en-IN`; controls the generated assistant speech language).
+- `GEMINI_TRANSCRIPTION_LANGUAGE_CODES` (optional comma-separated BCP-47 hints for caller speech, such as `en-IN,hi-IN`; leave unset for automatic language detection).
+
+Caller speech is transcribed by a separate `gemini-3.5-transcribe-live` stream using verbatim mode and up to 100 business-specific vocabulary terms. The original audio still goes to `gemini-3.8-live` for natural conversation and voice responses. The transcription stream reconnects independently; if it is unavailable, the call continues with the voice model's built-in transcription.
 
 Invalid model, voice, or language values are ignored and the defaults are used instead.
 

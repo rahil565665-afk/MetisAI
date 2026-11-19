@@ -135,8 +135,8 @@ test('dedicated Transcribe Live drives final caller captions while Gemini handle
   assert.ok(setup.inputAudioTranscription.customVocabulary.includes('root canal'));
 
   r.client.emit('message', { data: pcm(1600) });
-  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1);
-  assert.equal(recognizer.json.filter((message) => message.realtimeInput?.audio).length, 1, 'the same microphone frame reaches both streams');
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 0, 'raw audio is not sent through a second speech recognizer');
+  assert.equal(recognizer.json.filter((message) => message.realtimeInput?.audio).length, 1, 'the microphone frame reaches the dedicated ASR stream');
 
   r.gemini.receive({ serverContent: { inputTranscription: { text: 'poor native transcript' } } });
   assert.equal(r.client.json.some((message) => message.type === 'transcript' && message.role === 'user' && message.text.includes('poor native')), false, 'native transcript is suppressed while the dedicated ASR is healthy');
@@ -149,6 +149,7 @@ test('dedicated Transcribe Live drives final caller captions while Gemini handle
   assert.deepEqual(r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1), {
     type: 'transcript', role: 'user', text: 'My name is Rahil Khan.', final: true,
   });
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.text === 'My name is Rahil Khan.').length, 1, 'the exact ASR final is passed to the voice agent as caller text');
   recognizer.receive({ serverContent: { inputTranscription: { text: 'My date of birth is 12th of May 2005 and the reason is a routine checkup.' } } });
   const protectedCaption = r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1);
   assert.match(protectedCaption.text, /\[date of birth omitted\]/);
@@ -171,7 +172,7 @@ test('a Transcribe Live disconnect falls back and reconnects without ending the 
   assert.equal(r.client.json.some((message) => message.type === 'ended' || message.type === 'error'), false);
 
   r.client.emit('message', { data: pcm(1600) });
-  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1, 'native audio remains the fallback while ASR is reconnecting');
   assert.equal(replacement.json.filter((message) => message.realtimeInput?.audio).length, 0, 'do not send audio until the replacement recognizer accepts setup');
   r.gemini.receive({ serverContent: { inputTranscription: { text: 'fallback transcript' } } });
   assert.equal(r.client.json.some((message) => message.type === 'transcript' && message.text === 'fallback transcript'), true);
@@ -179,6 +180,7 @@ test('a Transcribe Live disconnect falls back and reconnects without ending the 
   replacement.receive({ setupComplete: {} });
   r.client.emit('message', { data: pcm(1600) });
   assert.equal(replacement.json.filter((message) => message.realtimeInput?.audio).length, 1);
+  assert.equal(r.gemini.json.filter((message) => message.realtimeInput?.audio).length, 1, 'after recovery, the voice agent receives text rather than duplicate raw audio');
   assert.equal(r.session.active, true);
   await r.session.end('client');
 });

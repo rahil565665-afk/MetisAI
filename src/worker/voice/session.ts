@@ -13,6 +13,7 @@ import {
   audioChunkMessage,
   parseServerMessage,
   setupMessage,
+  transcriptionSetupMessage,
   textInputMessage,
   toolResponseMessage,
   safeProviderText,
@@ -25,6 +26,7 @@ import {
   GREETING_TRIGGER,
   buildSystemInstruction,
   receptionistTools,
+  receptionistTranscriptionVocabulary,
   runTool,
   type CallFields,
   type CallStore,
@@ -76,6 +78,8 @@ export interface SessionLimits {
   warnMs: number;
   /** How many times a dropped Gemini connection is re-opened (resuming the same conversation). */
   maxReconnects: number;
+  /** Safe clean-session retries after resumption fails, only before any side effect may have started. */
+  maxFreshReconnects: number;
   /** Base pause between reconnect attempts; grows with each attempt. */
   reconnectDelayMs: number;
 }
@@ -89,6 +93,7 @@ export const DEFAULT_LIMITS: SessionLimits = {
   answerWaitMs: 2_500,
   warnMs: 30_000,
   maxReconnects: 3,
+  maxFreshReconnects: 2,
   reconnectDelayMs: 500,
 };
 
@@ -98,6 +103,12 @@ export interface SessionDeps {
   connectGemini(apiKey: string): Promise<VoiceSocket>;
   model: string;
   voiceName: string;
+  /** BCP-47 language hint passed to Gemini Live. */
+  languageCode?: string;
+  /** Optional dedicated streaming speech recognizer; the call falls back if it cannot connect. */
+  connectTranscriber?(apiKey: string): Promise<VoiceSocket>;
+  /** Empty means let the dedicated recognizer auto-detect the caller's language. */
+  transcriptionLanguageCodes?: string[];
   now?: () => Date;
   limits?: Partial<SessionLimits>;
   approvalTimeoutMs?: number;
@@ -127,6 +138,28 @@ const MAX_EVENTS = 100;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const RECOVERY_TRIGGER = 'INTERNAL RECOVERY CUE: the voice service briefly disconnected. Apologize once and ask the caller to repeat their last request.';
 const MUTATING_TOOLS = new Set(['create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
+const USER_SPEECH_RMS_THRESHOLD = 0.015;
+
+/** Date of birth is not needed for a routine receptionist booking, so redact it from saved/displayed captions. */
+function redactUnnecessaryDateOfBirth(text: string): string {
+  return text.replace(
+    /\b(?:(?:my|the)\s+)?(?:date\s+of\s+birth|dob)\b\s*(?:(?:is|was)\s*)?[^,;.!?]*?(?=\s+(?:and|but)\b|[,;.!?]|$)/gi,
+    '[date of birth omitted]',
+  );
+}
+
+/** True when an incoming PCM frame contains speech-like energy, not just microphone silence. */
+function hasVoiceActivity(bytes: Uint8Array): boolean {
+  const samples = Math.floor(bytes.byteLength / 2);
+  if (samples === 0) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sumSquares = 0;
+  for (let index = 0; index < samples; index += 1) {
+    const sample = view.getInt16(index * 2, true) / 32768;
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / samples) >= USER_SPEECH_RMS_THRESHOLD;
+}
 
 /**
  * One browser test call: the browser's microphone audio goes to Gemini Live, Gemini's spoken reply
@@ -137,6 +170,15 @@ export class VoiceSession {
   private readonly limits: SessionLimits;
   private readonly now: () => Date;
   private gemini: VoiceSocket | null = null;
+  /** Dedicated Transcribe Live sidecar. */
+  private transcriber: VoiceSocket | null = null;
+  private transcriberReady = false;
+  private transcriberUnavailable = false;
+  private transcriberReconnecting = false;
+  private transcriberSetupTimer: ReturnType<typeof setTimeout> | undefined;
+  private settleTranscriberSetup: ((ok: boolean) => void) | null = null;
+  private transcriberNotice = '';
+  private agentReady = false;
   /** A replacement connection that has been opened but has not yet accepted its setup message. */
   private pending: VoiceSocket | null = null;
   private pendingSettled: ((ok: boolean) => void) | null = null;
@@ -176,6 +218,7 @@ export class VoiceSession {
   private setupTimer: ReturnType<typeof setTimeout> | undefined;
   private idleTimer: ReturnType<typeof setInterval> | undefined;
   private current: { role: 'user' | 'assistant'; text: string } | null = null;
+  private currentIsInterim = false;
   private readonly cancelledCalls = new Set<string>();
   private toolChain: Promise<void> = Promise.resolve();
   private resolveDone!: () => void;
@@ -229,12 +272,14 @@ export class VoiceSession {
     this.prepared = prepared;
     this.callStartedAt = this.now();
 
+    this.transcriberUnavailable = !this.deps.connectTranscriber;
     const created = prepared.store.createCall({
       started_at: this.callStartedAt.toISOString(),
       metadata: { scheduling: this.scheduling() },
     }).catch(() => ({ id: null, problem: 'The call history could not be saved.' }));
     try {
       await this.openInitial();
+      if (this.deps.connectTranscriber) void this.startTranscription();
     } finally {
       const result = await created;
       this.callId = result.id;
@@ -267,6 +312,7 @@ export class VoiceSession {
       tools: receptionistTools(prepared.config, this.scheduling()),
       resumeHandle,
       longSession: this.longSession,
+      languageCode: this.deps.languageCode,
     }));
   }
 
@@ -315,8 +361,19 @@ export class VoiceSession {
       void this.finish('service', 'The browser sent an invalid audio frame.');
       return;
     }
-    // Audio sent before Gemini accepts the setup message is dropped, never queued.
-    if (this.ready && this.gemini) this.sendGemini(audioChunkMessage(bytesToBase64(bytes)));
+    // Audio sent before the conversational agent is ready is dropped, never queued.
+    // Once ready, duplicate the same PCM frame to the dedicated recognizer when available.
+    if (this.ready && this.gemini) {
+      if (hasVoiceActivity(bytes)) this.touch();
+      const encoded = bytesToBase64(bytes);
+      if (this.transcriberReady) {
+        // Dedicated ASR is the authoritative input path; the Live model receives its finalized text.
+        this.sendTranscriberAudio(encoded);
+      } else {
+        // Fallback to native audio understanding only while the dedicated recognizer is unavailable.
+        this.sendGemini(audioChunkMessage(encoded));
+      }
+    }
   }
 
   private warnedFrames = false;
@@ -361,6 +418,195 @@ export class VoiceSession {
     } catch {
       // A failed send means the socket is closing; its close handler deals with it.
     }
+  }
+
+  private sendTranscriberAudio(base64: string): void {
+    try {
+      this.transcriber?.send(JSON.stringify(audioChunkMessage(base64)));
+    } catch {
+      // ASR can recover independently; never let it end the conversation.
+    }
+  }
+
+  /** Start the dedicated recognizer. Failure only switches captions to native Live transcription. */
+  private async startTranscription(): Promise<void> {
+    if (!this.deps.connectTranscriber || this.finished) return;
+    const connected = await this.openTranscriberConnection();
+    if (connected || this.finished) return;
+    this.transcriberUnavailable = true;
+    this.transcriberNotice = 'Enhanced speech recognition is reconnecting; the voice conversation can continue.';
+    this.completeReady();
+    this.updateNotice();
+    void this.reconnectTranscriber();
+  }
+
+  /** Open one clean Transcribe Live stream and wait briefly for setupComplete. */
+  private async openTranscriberConnection(): Promise<boolean> {
+    const connect = this.deps.connectTranscriber;
+    const prepared = this.prepared;
+    if (!connect || !prepared || this.finished) return false;
+    let socket: VoiceSocket;
+    try {
+      socket = await connect(prepared.geminiApiKey);
+    } catch {
+      return false;
+    }
+    if (this.finished) {
+      this.closeQuietly(socket, NORMAL_CLOSE, 'Call ended');
+      return false;
+    }
+    this.transcriber = socket;
+    this.transcriberReady = false;
+    this.attachTranscriber(socket);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(this.transcriberSetupTimer);
+        this.transcriberSetupTimer = undefined;
+        if (this.settleTranscriberSetup === settle) this.settleTranscriberSetup = null;
+        resolve(ok);
+      };
+      this.settleTranscriberSetup = settle;
+      this.transcriberSetupTimer = setTimeout(() => {
+        if (this.transcriber === socket) {
+          this.transcriber = null;
+          this.transcriberReady = false;
+          this.closeQuietly(socket, NORMAL_CLOSE, 'Transcriber setup timed out');
+        }
+        settle(false);
+      }, this.limits.setupTimeoutMs);
+      try {
+        socket.send(JSON.stringify(transcriptionSetupMessage({
+          languageCodes: this.deps.transcriptionLanguageCodes ?? [],
+          customVocabulary: receptionistTranscriptionVocabulary(prepared.config),
+        })));
+      } catch {
+        if (this.transcriber === socket) this.transcriber = null;
+        this.closeQuietly(socket, NORMAL_CLOSE, 'Transcriber setup failed');
+        settle(false);
+      }
+    });
+  }
+
+  private attachTranscriber(socket: VoiceSocket): void {
+    socket.addEventListener('message', (event) => this.onTranscriberMessage(socket, event.data));
+    socket.addEventListener('close', () => this.onTranscriberClosed(socket));
+    socket.addEventListener('error', () => this.onTranscriberClosed(socket));
+  }
+
+  private onTranscriberMessage(socket: VoiceSocket, data: unknown): void {
+    if (this.finished || socket !== this.transcriber) return;
+    if (typeof data !== 'string' && !isBinary(data)) {
+      this.warnUnsupportedFrame();
+      return;
+    }
+    for (const event of parseServerMessage(data)) {
+      if (this.finished || socket !== this.transcriber) return;
+      switch (event.kind) {
+        case 'setupComplete':
+          this.transcriberReady = true;
+          this.transcriberUnavailable = false;
+          this.transcriberNotice = '';
+          this.settleTranscriberSetup?.(true);
+          this.completeReady();
+          this.updateNotice();
+          break;
+        case 'interimInputTranscript':
+          this.touch();
+          this.updateInterimUserTranscript(event.text);
+          break;
+        case 'inputTranscript':
+          this.touch();
+          this.commitUserTranscript(event.text);
+          break;
+        case 'goAway':
+          // Transcribe Live sessions are short-lived; refresh independently of the voice agent.
+          this.closeQuietly(socket, NORMAL_CLOSE, 'Refresh transcription stream');
+          break;
+        case 'error':
+          console.error('[voice-session] transcription sidecar reported an error');
+          this.closeQuietly(socket, SERVICE_CLOSE, 'Transcription sidecar error');
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  private onTranscriberClosed(socket: VoiceSocket): void {
+    if (socket !== this.transcriber) return;
+    const wasReady = this.transcriberReady;
+    this.transcriber = null;
+    this.transcriberReady = false;
+    this.transcriberUnavailable = true;
+    this.settleTranscriberSetup?.(false);
+    if (this.finished) return;
+    this.transcriberNotice = 'Enhanced speech recognition disconnected; the call is continuing with fallback transcription.';
+    this.completeReady();
+    this.updateNotice();
+    if (wasReady && this.ready) void this.reconnectTranscriber();
+  }
+
+  /** Recover only the recognizer; never close or restart the live conversation because ASR dropped. */
+  private async reconnectTranscriber(): Promise<void> {
+    if (this.transcriberReconnecting || this.finished || !this.deps.connectTranscriber) return;
+    this.transcriberReconnecting = true;
+    try {
+      for (let attempt = 1; attempt <= 2 && !this.finished; attempt += 1) {
+        if (attempt > 1) await pause(750 * attempt);
+        if (this.finished) return;
+        if (await this.openTranscriberConnection()) {
+          this.transcriberUnavailable = false;
+          this.transcriberNotice = '';
+          this.updateNotice();
+          return;
+        }
+        console.error('[voice-session] transcription reconnect failed', attempt);
+      }
+      this.transcriberNotice = 'Enhanced speech recognition is unavailable for this call. The voice assistant is still connected.';
+      this.transcriberUnavailable = true;
+      this.updateNotice();
+    } finally {
+      this.transcriberReconnecting = false;
+    }
+  }
+
+  /** Interim hypotheses replace one another; they are never used to authorize a booking. */
+  private updateInterimUserTranscript(text: string): void {
+    const value = text.trim();
+    if (!value) return;
+    if (this.current && this.current.role !== 'user') this.flushTranscript();
+    const safeValue = redactUnnecessaryDateOfBirth(value);
+    if (!safeValue.trim()) return;
+    this.current = { role: 'user', text: safeValue };
+    this.currentIsInterim = true;
+    this.send({ type: 'transcript', role: 'user', text: safeValue, final: false });
+  }
+
+  /** Commit one exact final ASR segment for the transcript and booking-confirmation guard. */
+  private commitUserTranscript(text: string): void {
+    const value = redactUnnecessaryDateOfBirth(text.trim());
+    if (!value) return;
+    if (this.current && this.current.role !== 'user') this.flushTranscript();
+    this.current = null;
+    this.currentIsInterim = false;
+    this.log.push({ role: 'user', text: value.slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
+    this.callerWords = (this.callerWords ? this.callerWords + ' ' : '') + value;
+    this.send({ type: 'transcript', role: 'user', text: value, final: true });
+    // Feed the verbatim ASR result into the speech-to-speech agent so it can act on
+    // the same words shown to the receptionist, rather than running a second ASR path.
+    this.sendGemini(textInputMessage(value));
+  }
+
+  private completeReady(): void {
+    if (this.ready || !this.agentReady || (!this.transcriberReady && !this.transcriberUnavailable)) return;
+    this.ready = true;
+    clearTimeout(this.setupTimer);
+    this.touch();
+    this.send({ type: 'ready' });
+    this.sendGemini(textInputMessage(GREETING_TRIGGER));
   }
 
   private onGeminiMessage(socket: VoiceSocket, data: unknown): void {
@@ -432,11 +678,24 @@ export class VoiceSession {
         console.error('[voice-session] reconnect attempt failed', attempt, cause);
       }
       if (!this.finished && !this.gemini) {
-        if (!this.mutationAttempted && await this.openReplacement(null, true)) return;
-        const failure = this.mutationAttempted
-          ? `The voice service disconnected while a booking, message, or handoff may have been processing. Check Call activity and the connected service before trying again${detail ? ` (${detail})` : ''}.`
-          : `The voice service connection was lost and could not be restored${detail}. Try again.`;
-        await this.finish('service', failure);
+        let recovered = false;
+        if (!this.mutationAttempted) {
+          for (let attempt = 1; attempt <= this.limits.maxFreshReconnects && !this.finished; attempt += 1) {
+            if (attempt > 1) await pause(this.limits.reconnectDelayMs * attempt);
+            if (this.finished) return;
+            if (await this.openReplacement(null, true)) {
+              recovered = true;
+              break;
+            }
+            console.error('[voice-session] fresh recovery attempt failed', attempt, cause);
+          }
+        }
+        if (!recovered && !this.finished) {
+          const failure = this.mutationAttempted
+            ? `The voice service disconnected while a booking, message, or handoff may have been processing. Check Call activity and the connected service before trying again${detail ? ` (${detail})` : ''}.`
+            : `The voice service connection was lost and could not be restored${detail}. Try again.`;
+          await this.finish('service', failure);
+        }
       }
     } finally {
       this.reconnecting = false;
@@ -510,12 +769,8 @@ export class VoiceSession {
   private onGeminiEvent(event: GeminiEvent): void {
     switch (event.kind) {
       case 'setupComplete':
-        if (this.ready) return;
-        this.ready = true;
-        clearTimeout(this.setupTimer);
-        this.touch();
-        this.send({ type: 'ready' });
-        this.sendGemini(textInputMessage(GREETING_TRIGGER));
+        this.agentReady = true;
+        this.completeReady();
         return;
       case 'interrupted':
         this.flushTranscript();
@@ -529,9 +784,13 @@ export class VoiceSession {
         console.error('[voice-session] unexpected audio format', event.mimeType);
         void this.finish('service', 'The voice service returned audio in an unsupported format.');
         return;
+      case 'interimInputTranscript':
+        // The dedicated recognizer is the source of truth whenever it is connected.
+        if (!this.transcriberReady) this.updateInterimUserTranscript(event.text);
+        return;
       case 'inputTranscript':
         this.touch();
-        this.appendTranscript('user', event.text);
+        if (!this.transcriberReady) this.appendTranscript('user', event.text);
         return;
       case 'outputTranscript':
         this.touch();
@@ -542,7 +801,8 @@ export class VoiceSession {
         this.send({ type: 'turn_complete' });
         return;
       case 'resumption':
-        if (event.resumable && event.handle) this.resumeHandle = event.handle;
+        // A non-resumable update invalidates the previous handle; never retry a stale one.
+        this.resumeHandle = event.resumable && event.handle ? event.handle : null;
         return;
       case 'toolCall': {
         this.touch();
@@ -572,18 +832,23 @@ export class VoiceSession {
 
   private appendTranscript(role: 'user' | 'assistant', fragment: string): void {
     if (this.current && this.current.role !== role) this.flushTranscript();
-    this.current = { role, text: `${this.current?.text ?? ''}${fragment}` };
+    this.current = { role, text: `${this.current?.role === role && !this.currentIsInterim ? this.current.text : ''}${fragment}` };
+    this.currentIsInterim = false;
     if (role === 'user') this.callerWords += fragment;
-    this.send({ type: 'transcript', role, text: this.current.text, final: false });
+    const visibleText = role === 'user' ? redactUnnecessaryDateOfBirth(this.current.text) : this.current.text;
+    this.send({ type: 'transcript', role, text: visibleText, final: false });
   }
 
   private flushTranscript(): void {
     if (!this.current) return;
     const { role, text } = this.current;
+    const wasInterim = this.currentIsInterim;
     this.current = null;
-    if (!text.trim()) return;
-    this.log.push({ role, text: text.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
-    this.send({ type: 'transcript', role, text, final: true });
+    this.currentIsInterim = false;
+    const visibleText = role === 'user' ? redactUnnecessaryDateOfBirth(text) : text;
+    if (!visibleText.trim() || wasInterim) return;
+    this.log.push({ role, text: visibleText.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
+    this.send({ type: 'transcript', role, text: visibleText, final: true });
   }
 
   /**
@@ -674,6 +939,7 @@ export class VoiceSession {
     if (this.finished) return;
     let message = '';
     if (this.ready && !this.gemini) message = RECONNECT_NOTICE;
+    else if (this.transcriberNotice) message = this.transcriberNotice;
     else if (this.warnedLimit) message = LIMIT_NOTICE;
     else if (this.endingSoon) message = ENDING_NOTICE;
     else if (this.warnedIdle) message = IDLE_NOTICE;
@@ -696,6 +962,13 @@ export class VoiceSession {
     clearTimeout(this.deadlineTimer);
     clearTimeout(this.setupTimer);
     clearInterval(this.idleTimer);
+    clearTimeout(this.transcriberSetupTimer);
+    this.transcriberSetupTimer = undefined;
+    this.settleTranscriberSetup?.(false);
+    this.settleTranscriberSetup = null;
+    if (this.transcriber) this.closeQuietly(this.transcriber, NORMAL_CLOSE, 'Call ended');
+    this.transcriber = null;
+    this.transcriberReady = false;
     if (this.pending) this.closeQuietly(this.pending, NORMAL_CLOSE, 'Call ended');
     this.pending = null;
     this.settlePending(false);

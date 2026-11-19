@@ -149,6 +149,10 @@ test('dedicated Transcribe Live drives final caller captions while Gemini handle
   assert.deepEqual(r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1), {
     type: 'transcript', role: 'user', text: 'My name is Rahil Khan.', final: true,
   });
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'My date of birth is 12th of May 2005 and the reason is a routine checkup.' } } });
+  const protectedCaption = r.client.json.filter((message) => message.type === 'transcript' && message.role === 'user').at(-1);
+  assert.match(protectedCaption.text, /\[date of birth omitted\]/);
+  assert.equal(protectedCaption.text.includes('2005'), false);
   assert.equal(r.session.active, true);
   await r.session.end('client');
   const saved = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1].metadata.transcript;

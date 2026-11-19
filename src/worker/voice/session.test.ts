@@ -185,10 +185,19 @@ test('hang-up intent detector does not end a call for questions or negated comma
   await ready(r);
   recognizer.receive({ serverContent: { inputTranscription: { text: 'How do I hang up?' } } });
   recognizer.receive({ serverContent: { inputTranscription: { text: "Don't hang up." } } });
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'I told you not to hang up.' } } });
   assert.equal(r.session.active, true);
   assert.equal(r.client.json.some((message) => message.type === 'ended'), false);
   await r.session.end('client');
   await r.done;
+});
+
+test('the fallback Live transcript also ends the call when the caller says hang up', async () => {
+  const r = rig();
+  await ready(r);
+  r.gemini.receive({ serverContent: { inputTranscription: { text: 'No, hang up.' }, turnComplete: true } });
+  await r.done;
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'client' });
 });
 
 test('the browser end control still terminates a live session directly', async () => {

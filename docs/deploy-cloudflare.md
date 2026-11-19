@@ -50,7 +50,7 @@ Optional plain-text variables (Settings → Variables, type **Text**) for the vo
 - `GEMINI_LANGUAGE_CODE` (default `en-IN`; controls the generated assistant speech language).
 - `GEMINI_TRANSCRIPTION_LANGUAGE_CODES` (optional comma-separated BCP-47 hints for caller speech, such as `en-IN,hi-IN`; leave unset for automatic language detection).
 
-Caller speech is transcribed by a separate `gemini-3.5-transcribe-live` stream using verbatim mode and up to 100 business-specific vocabulary terms. The original audio still goes to `gemini-3.8-live` for natural conversation and voice responses. The transcription stream reconnects independently; if it is unavailable, the call continues with the voice model's built-in transcription.
+Caller audio is transcribed by a separate `gemini-3.5-transcribe-live` stream using verbatim mode and up to 100 business-specific vocabulary terms. Final recognized text is passed into `gemini-3.8-live` for reasoning and natural spoken replies; raw audio is sent to the conversational model only as a fallback while the dedicated recognizer is unavailable. The transcription stream reconnects independently and cannot end an otherwise active call.
 
 Invalid model, voice, or language values are ignored and the defaults are used instead.
 

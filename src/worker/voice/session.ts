@@ -140,6 +140,18 @@ const RECOVERY_TRIGGER = 'INTERNAL RECOVERY CUE: the voice service briefly disco
 const MUTATING_TOOLS = new Set(['create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
 const USER_SPEECH_RMS_THRESHOLD = 0.015;
 
+const HANGUP_PHRASE_SOURCE = '\\b(?:hang\\s+up|end(?:\\s+(?:the|this))?\\s+call|disconnect(?:\\s+me)?|cut\\s+(?:the|this)\\s+call|terminate\\s+(?:the|this)\\s+call)\\b';
+const HANGUP_PATTERN = new RegExp(HANGUP_PHRASE_SOURCE, 'i');
+
+/** A caller's direct request to stop the call; don't mistake a question about how to hang up for a command. */
+function isCallerHangupRequest(text: string): boolean {
+  const value = text.toLowerCase().replace(/[’]/g, "'");
+  const asksHow = new RegExp('\\\\bhow\\\\s+(?:do|can|would)\\\\s+i\\\\b[^.!?]{0,80}' + HANGUP_PHRASE_SOURCE, 'i');
+  const negates = new RegExp('\\\\b(?:don\\'t|do not|dont|never|can\\'t|cannot)\\\\b[^.!?]{0,40}' + HANGUP_PHRASE_SOURCE, 'i');
+  if (asksHow.test(value) || negates.test(value) || /\\bnot\\s+ready\\s+to\\s+(?:hang\\s+up|end)/i.test(value)) return false;
+  return HANGUP_PATTERN.test(value) || /^\\s*(?:please\\s+)?(?:goodbye|bye\\s+bye)[.!?]*\\s*$/i.test(value);
+}
+
 /** Date of birth is not needed for a routine receptionist booking, so redact it from saved/displayed captions. */
 function redactUnnecessaryDateOfBirth(text: string): string {
   return text.replace(
@@ -595,6 +607,11 @@ export class VoiceSession {
     this.log.push({ role: 'user', text: value.slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
     this.callerWords = (this.callerWords ? this.callerWords + ' ' : '') + value;
     this.send({ type: 'transcript', role: 'user', text: value, final: true });
+    if (isCallerHangupRequest(value)) {
+      this.note('Caller explicitly asked to end the call.');
+      void this.finish('client');
+      return;
+    }
     // Feed the verbatim ASR result into the speech-to-speech agent so it can act on
     // the same words shown to the receptionist, rather than running a second ASR path.
     this.sendGemini(textInputMessage(value));
@@ -849,6 +866,10 @@ export class VoiceSession {
     if (!visibleText.trim() || wasInterim) return;
     this.log.push({ role, text: visibleText.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
     this.send({ type: 'transcript', role, text: visibleText, final: true });
+    if (!this.finished && role === 'user' && isCallerHangupRequest(visibleText)) {
+      this.note('Caller explicitly asked to end the call.');
+      void this.finish('client');
+    }
   }
 
   /**

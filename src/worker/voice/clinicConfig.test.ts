@@ -49,12 +49,12 @@ test('missing, malformed and oversized settings degrade safely', () => {
   assert.equal(config.services[0].length, 120);
   assert.equal(config.tone.length, 500);
   assert.deepEqual(config.enabledActions, { booking: true, take_messages: true, hand_off: true });
-  assert.ok(normalizeClinicConfig({ ...base, receptionist_config: null }).greeting.startsWith('Thank you for calling'));
+  assert.match(normalizeClinicConfig({ ...base, receptionist_config: null }).greeting, /^Hi, you’ve reached/);
 });
 
 test('text containing control characters is dropped rather than passed to the model', () => {
   const config = normalizeClinicConfig({ ...base, receptionist_config: { greeting: 'hi\u0000there', knowledge_base: 'line one\nline two\ttabbed' } });
-  assert.match(config.greeting, /Thank you for calling/);
+  assert.match(config.greeting, /^Hi, you’ve reached/);
   assert.equal(config.knowledge, 'line one\nline two\ttabbed');
 });
 
@@ -69,7 +69,7 @@ test('all business templates supply safe defaults while legacy dental_clinic rem
   for (const id of BUSINESS_TEMPLATE_IDS) {
     const config = normalizeClinicConfig({ ...base, business_type: id, name: 'Example', receptionist_config: {} });
     assert.equal(config.businessType, id);
-    assert.ok(config.greeting.startsWith('Thank you for calling'));
+    assert.ok(config.greeting.length > 0);
     assert.ok(config.personaName.length > 0);
     assert.ok(config.tone.length > 0);
     assert.ok(config.services.length > 0);

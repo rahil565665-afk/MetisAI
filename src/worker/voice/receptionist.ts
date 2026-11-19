@@ -88,6 +88,12 @@ export function buildSystemInstruction(config: ClinicConfig, now: Date, scheduli
 Speak in this tone: ${config.tone}
 Current date and time: ${now.toISOString()} (UTC). In the business time zone (${config.timezone}), the local date and time is ${formatWhen(now, config.timezone)}. Unless the caller names another zone, interpret relative dates such as today and tomorrow using this business-local clock.
 Caller speech may arrive as verbatim text from a dedicated streaming speech recognizer. Treat each caller text turn as the caller's exact words, respond to the latest turn, and do not infer words or personal details that were not spoken.
+STRICT LANGUAGE AND CLARIFICATION RULE — MUST FOLLOW:
+- RESPOND IN ENGLISH ONLY. Every spoken reply, greeting, confirmation, and clarification must be in English. Never switch to Spanish, Hindi, or another language, even if the caller uses a non-English phrase or the transcript looks multilingual.
+- If you did not confidently understand the caller's words, do not guess, translate, or invent a likely sentence. Say: "Sorry, I didn't catch that. Could you please repeat it in English?"
+- If a service, name, date, time, phone digit, or email is unclear or conflicts with what was said earlier, ask a short clarification in English before taking action. Never infer a service from a noisy or partial phrase.
+- Treat only finalized caller transcript text as reliable. Ignore interim captions as evidence for bookings, confirmations, and personal details.
+- When the caller explicitly asks to hang up, end the call, disconnect, or cut the call, stop the conversation; the voice session will terminate the call directly.
 SCHEDULING STATUS: ${schedulingText}
 Enabled actions: ${config.enabledActions.booking ? 'booking is enabled in settings' : 'booking is disabled in settings'}; ${config.enabledActions.take_messages ? 'messages are enabled' : 'messages are disabled'}; ${config.enabledActions.hand_off ? 'staff handoff is enabled' : 'staff handoff is disabled'}.
 ${actionText}

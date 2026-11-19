@@ -483,11 +483,23 @@ test('the time limit and the idle limit end the call', async () => {
   assert.deepEqual(idle.client.json.at(-1), { type: 'ended', reason: 'idle' });
 });
 
-test('speech keeps an otherwise quiet call alive', async () => {
+test('speech transcripts keep an otherwise quiet call alive', async () => {
   const r = rig({ limits: { maxDurationMs: 60_000, idleMs: 80 } });
   await ready(r);
   for (let index = 0; index < 6; index += 1) {
     r.gemini.receive({ serverContent: { inputTranscription: { text: 'x' } } });
+    await wait(25);
+  }
+  assert.equal(r.session.active, true);
+  await r.session.end('client');
+});
+
+test('microphone speech energy keeps a call alive even while transcription is delayed', async () => {
+  const r = rig({ limits: { maxDurationMs: 60_000, idleMs: 80 } });
+  await ready(r);
+  const speech = new Int16Array(800).fill(8192).buffer;
+  for (let index = 0; index < 6; index += 1) {
+    r.client.emit('message', { data: speech });
     await wait(25);
   }
   assert.equal(r.session.active, true);
@@ -573,16 +585,16 @@ test('a provider drop during booking approval fails closed instead of starting a
 
 const resumable = (r: Rig, handle = 'handle-1') => r.gemini.receive({ sessionResumptionUpdate: { newHandle: handle, resumable: true } });
 
-test('a dropped connection is resumed with the latest handle, without a second greeting or ready', async () => {
+test('a non-resumable update clears an expired handle before recovery', async () => {
   const second = new FakeSocket();
-  const r = rig({ more: [second] });
+  const r = rig({ more: [second], limits: { maxReconnects: 1, maxFreshReconnects: 1 } });
   await ready(r);
   resumable(r);
   r.gemini.receive({ sessionResumptionUpdate: { resumable: false } });
   r.gemini.emit('close', { code: 1011, reason: 'internal' });
 
-  await until(() => second.json.length > 0, 'resume setup');
-  assert.deepEqual(second.json[0].setup.sessionResumption, { handle: 'handle-1' });
+  await until(() => second.json.length > 0, 'fresh recovery setup');
+  assert.deepEqual(second.json[0].setup.sessionResumption, {});
   const notices = () => r.client.json.filter((message) => message.type === 'notice').map((message) => message.message);
   assert.match(notices().at(-1), /Reconnecting/);
   r.client.emit('message', { data: pcm(1600) });
@@ -644,7 +656,7 @@ test('when every reconnect attempt fails the call ends with an explanation', asy
   gemini.receive({ sessionResumptionUpdate: { newHandle: 'h', resumable: true } });
   gemini.emit('close', { code: 1006, reason: '' });
   await r.done;
-  assert.equal(connects, 4, 'the first connection, two resumption attempts, and one fresh fallback');
+  assert.equal(connects, 5, 'the first connection, two resumption attempts, and two fresh recovery attempts');
   assert.match(r.client.json.find((message) => message.type === 'error').message, /could not be restored \(code 1006\)/);
   assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'service' });
 });
@@ -652,7 +664,7 @@ test('when every reconnect attempt fails the call ends with an explanation', asy
 test('a replacement that never accepts its setup is dropped and the call fails clearly', async () => {
   const silent = new FakeSocket();
   const freshSilent = new FakeSocket();
-  const r = rig({ more: [silent, freshSilent], limits: { maxReconnects: 1, setupTimeoutMs: 40 } });
+  const r = rig({ more: [silent, freshSilent], limits: { maxReconnects: 1, maxFreshReconnects: 1, setupTimeoutMs: 40 } });
   await ready(r);
   resumable(r);
   r.gemini.emit('close', { code: 1011, reason: '' });

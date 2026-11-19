@@ -143,7 +143,7 @@ const USER_SPEECH_RMS_THRESHOLD = 0.015;
 /** Date of birth is not needed for a routine receptionist booking, so redact it from saved/displayed captions. */
 function redactUnnecessaryDateOfBirth(text: string): string {
   return text.replace(
-    /\\b(?:(?:my|the)\\s+)?(?:date\\s+of\\s+birth|dob)\\b\\s*(?:(?:is|was)\\s*)?[^,;.!?]*?(?=\\s+(?:and|but)\\b|[,;.!?]|$)/gi,
+    /\b(?:(?:my|the)\s+)?(?:date\s+of\s+birth|dob)\b\s*(?:(?:is|was)\s*)?[^,;.!?]*?(?=\s+(?:and|but)\b|[,;.!?]|$)/gi,
     '[date of birth omitted]',
   );
 }

@@ -147,7 +147,7 @@ const HANGUP_PATTERN = new RegExp(HANGUP_PHRASE_SOURCE, 'i');
 function isCallerHangupRequest(text: string): boolean {
   const value = text.toLowerCase().replace(/[’]/g, "'");
   const asksHow = new RegExp('\\bhow\\s+(?:do|can|would)\\s+i\\b[^.!?]{0,80}' + HANGUP_PHRASE_SOURCE, 'i');
-  const negates = new RegExp("\\b(?:don't|do not|dont|never|can't|cannot)\\b[^.!?]{0,40}" + HANGUP_PHRASE_SOURCE, 'i');
+  const negates = new RegExp("\\b(?:don't|do not|dont|never|not to|not|can't|cannot)\\b[^.!?]{0,60}" + HANGUP_PHRASE_SOURCE, 'i');
   if (asksHow.test(value) || negates.test(value) || /\bnot\s+ready\s+to\s+(?:hang\s+up|end)/i.test(value)) return false;
   return HANGUP_PATTERN.test(value) || /^\s*(?:please\s+)?(?:goodbye|bye\s+bye)[.!?]*\s*$/i.test(value);
 }

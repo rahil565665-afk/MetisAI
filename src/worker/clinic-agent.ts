@@ -30,13 +30,19 @@ function reject(status: number, message: string): Response {
 /** Open the outbound WebSocket to Gemini Live. The API key travels in a header, never in the URL. */
 async function openGeminiSocket(apiKey: string): Promise<VoiceSocket> {
   let response: Response;
+  const controller = new AbortController();
+  // Bound only the HTTP upgrade. Leaving AbortSignal.timeout() attached would keep
+  // its timer armed after fetch resolves and risks aborting the upgraded live socket.
+  const handshakeTimer = setTimeout(() => controller.abort(), 10_000);
   try {
     response = await fetch(geminiLiveUrl(developmentUrl('GEMINI_LIVE_ORIGIN')), {
       headers: { Upgrade: 'websocket', 'x-goog-api-key': apiKey },
-      signal: AbortSignal.timeout(10_000),
+      signal: controller.signal,
     });
   } catch {
     throw new SessionStartError('The Gemini Live service could not be reached. Try again shortly.');
+  } finally {
+    clearTimeout(handshakeTimer);
   }
   const socket = response.webSocket;
   if (response.status !== 101 || !socket) {

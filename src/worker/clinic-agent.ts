@@ -131,9 +131,11 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       client: server as unknown as VoiceSocket,
       prepare: () => this.prepare(tenantId),
       connectGemini: openGeminiSocket,
+      connectTranscriber: openGeminiSocket,
       model: settings.model,
       voiceName: settings.voiceName,
       languageCode: settings.languageCode,
+      transcriptionLanguageCodes: settings.transcriptionLanguageCodes,
     });
     this.session = session;
     // The call is written to the clinic's history after the browser disconnects, so keep this object alive for it.

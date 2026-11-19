@@ -44,7 +44,12 @@ Secrets are kept across deployments. `wrangler.jsonc` only sets the non-secret `
 
 **Make all four *Secret*, not *Text*.** A deploy replaces a Worker's variables with the ones in `wrangler.jsonc`, which would delete any dashboard variable of type *Text*. This repository sets `keep_vars: true` so a deploy leaves dashboard variables alone, but Secret is still the right type, because it is never shown or deleted. **Never regenerate `TENANT_CREDENTIALS_ENCRYPTION_KEY` once businesses have saved keys**: keys saved under the old value can no longer be read.
 
-Optional plain-text variables (Settings → Variables, type **Text**), only if Google changes the Live API: `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`) and `GEMINI_VOICE_NAME` (default `Charon`). Invalid values are ignored with the default used instead.
+Optional plain-text variables (Settings → Variables, type **Text**) for the voice runtime:
+- `GEMINI_LIVE_MODEL` (default `models/gemini-3.8-live`)
+- `GEMINI_VOICE_NAME` (default `Sulafat`, Google's warm voice preset)
+- `GEMINI_LANGUAGE_CODE` (default `en-IN`, a BCP-47 language hint for speech recognition and generated speech; set this to the main callers' language, such as `en-US` or `hi-IN`).
+
+Invalid model, voice, or language values are ignored and the defaults are used instead.
 
 ## 4. Sign in and create a business
 

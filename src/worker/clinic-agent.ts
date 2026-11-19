@@ -31,8 +31,8 @@ function reject(status: number, message: string): Response {
 async function openGeminiSocket(apiKey: string): Promise<VoiceSocket> {
   let response: Response;
   const controller = new AbortController();
-  // Bound only the HTTP upgrade. Clear the timer as soon as fetch resolves so it cannot
-  // abort the long-lived WebSocket after the handshake has succeeded.
+  // Bound only the HTTP upgrade. Leaving AbortSignal.timeout() attached would keep
+  // its timer armed after fetch resolves and risks aborting the upgraded live socket.
   const handshakeTimer = setTimeout(() => controller.abort(), 10_000);
   try {
     response = await fetch(geminiLiveUrl(developmentUrl('GEMINI_LIVE_ORIGIN')), {
@@ -131,8 +131,11 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       client: server as unknown as VoiceSocket,
       prepare: () => this.prepare(tenantId),
       connectGemini: openGeminiSocket,
+      connectTranscriber: openGeminiSocket,
       model: settings.model,
       voiceName: settings.voiceName,
+      languageCode: settings.languageCode,
+      transcriptionLanguageCodes: settings.transcriptionLanguageCodes,
     });
     this.session = session;
     // The call is written to the clinic's history after the browser disconnects, so keep this object alive for it.

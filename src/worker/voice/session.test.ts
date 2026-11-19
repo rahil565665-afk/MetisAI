@@ -603,7 +603,8 @@ test('a non-resumable update clears an expired handle before recovery', async ()
   second.receive({ setupComplete: {} });
   await until(() => notices().at(-1) === '', 'reconnect banner cleared');
   assert.equal(r.client.json.filter((message) => message.type === 'ready').length, 1);
-  assert.equal(second.json.length, 1, 'no second greeting is requested');
+  assert.equal(second.json.some((message) => message.realtimeInput?.text?.includes('Greet them now')), false, 'recovery does not repeat the original greeting');
+  assert.equal(second.json.filter((message) => message.realtimeInput?.text?.includes('INTERNAL RECOVERY CUE')).length, 1, 'the caller is asked to repeat only when prior context cannot be resumed');
   r.client.emit('message', { data: pcm(1600) });
   assert.equal(second.json.filter((message) => message.realtimeInput?.audio).length, 1);
   second.receive(audioFrom([5, 6]));

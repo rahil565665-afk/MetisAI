@@ -81,7 +81,7 @@ function rig(options: { createProblem?: string; updateFails?: boolean; schedulin
         if (!next) throw new SessionStartError('Transcriber test connection unavailable');
         return next;
       },
-      transcriptionLanguageCodes: ['en-IN', 'hi-IN'],
+      transcriptionLanguageCodes: ['en-US'],
     } : {}),
     model: 'models/test-live',
     voiceName: 'Puck',
@@ -129,7 +129,13 @@ test('dedicated Transcribe Live drives final caller captions while Gemini handle
   const setup = recognizer.json[0].setup;
   assert.equal(setup.model, 'models/gemini-3.5-transcribe-live');
   assert.deepEqual(setup.generationConfig.responseModalities, ['TEXT']);
-  assert.deepEqual(setup.inputAudioTranscription.languageCodes, ['en-IN', 'hi-IN']);
+  assert.deepEqual(setup.inputAudioTranscription.languageCodes, ['en-US']);
+  assert.deepEqual(setup.realtimeInputConfig.automaticActivityDetection, {
+    startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    prefixPaddingMs: 200,
+    silenceDurationMs: 650,
+  });
   assert.equal(setup.inputAudioTranscription.mode, 'VERBATIM');
   assert.ok(setup.inputAudioTranscription.customVocabulary.includes('Northside Dental'));
   assert.ok(setup.inputAudioTranscription.customVocabulary.includes('root canal'));
@@ -159,6 +165,38 @@ test('dedicated Transcribe Live drives final caller captions while Gemini handle
   const saved = r.calls.filter(([name]) => name === 'updateCall').at(-1)![1].metadata.transcript;
   assert.ok(saved.some((turn: { role: string; text: string }) => turn.role === 'user' && turn.text === 'My name is Rahil Khan.'));
   assert.equal(saved.some((turn: { role: string; text: string }) => turn.text.includes('poor native')), false);
+});
+
+test('a finalized English ASR hang-up command ends the browser session without sending it back to Gemini', async () => {
+  const recognizer = new FakeSocket();
+  const r = rig({ transcriber: recognizer });
+  await ready(r);
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'I told you to cut the call.' } } });
+  await r.done;
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'client' });
+  assert.equal(r.client.json.some((message) => message.type === 'error'), false);
+  assert.equal(r.gemini.json.some((message) => message.realtimeInput?.text === 'I told you to cut the call.'), false);
+  assert.equal(r.calls.filter(([name]) => name === 'updateCall').length, 1);
+});
+
+test('hang-up intent detector does not end a call for questions or negated commands', async () => {
+  const recognizer = new FakeSocket();
+  const r = rig({ transcriber: recognizer });
+  await ready(r);
+  recognizer.receive({ serverContent: { inputTranscription: { text: 'How do I hang up?' } } });
+  recognizer.receive({ serverContent: { inputTranscription: { text: "Don't hang up." } } });
+  assert.equal(r.session.active, true);
+  assert.equal(r.client.json.some((message) => message.type === 'ended'), false);
+  await r.session.end('client');
+  await r.done;
+});
+
+test('the browser end control still terminates a live session directly', async () => {
+  const r = rig();
+  await ready(r);
+  r.client.emit('message', { data: JSON.stringify({ type: 'end' }) });
+  await r.done;
+  assert.deepEqual(r.client.json.at(-1), { type: 'ended', reason: 'client' });
 });
 
 test('a Transcribe Live disconnect falls back and reconnects without ending the live call', async () => {

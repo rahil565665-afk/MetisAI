@@ -140,6 +140,14 @@ const RECOVERY_TRIGGER = 'INTERNAL RECOVERY CUE: the voice service briefly disco
 const MUTATING_TOOLS = new Set(['create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
 const USER_SPEECH_RMS_THRESHOLD = 0.015;
 
+/** Date of birth is not needed for a routine receptionist booking, so redact it from saved/displayed captions. */
+function redactUnnecessaryDateOfBirth(text: string): string {
+  return text.replace(
+    /\\b(?:(?:my|the)\\s+)?(?:date\\s+of\\s+birth|dob)\\b\\s*(?:(?:is|was)\\s*)?[^,;.!?]*?(?=\\s+(?:and|but)\\b|[,;.!?]|$)/gi,
+    '[date of birth omitted]',
+  );
+}
+
 /** True when an incoming PCM frame contains speech-like energy, not just microphone silence. */
 function hasVoiceActivity(bytes: Uint8Array): boolean {
   const samples = Math.floor(bytes.byteLength / 2);
@@ -565,14 +573,16 @@ export class VoiceSession {
     const value = text.trim();
     if (!value) return;
     if (this.current && this.current.role !== 'user') this.flushTranscript();
-    this.current = { role: 'user', text: value };
+    const safeValue = redactUnnecessaryDateOfBirth(value);
+    if (!safeValue.trim()) return;
+    this.current = { role: 'user', text: safeValue };
     this.currentIsInterim = true;
-    this.send({ type: 'transcript', role: 'user', text: value, final: false });
+    this.send({ type: 'transcript', role: 'user', text: safeValue, final: false });
   }
 
   /** Commit one exact final ASR segment for the transcript and booking-confirmation guard. */
   private commitUserTranscript(text: string): void {
-    const value = text.trim();
+    const value = redactUnnecessaryDateOfBirth(text.trim());
     if (!value) return;
     if (this.current && this.current.role !== 'user') this.flushTranscript();
     this.current = null;
@@ -817,7 +827,8 @@ export class VoiceSession {
     this.current = { role, text: `${this.current?.role === role && !this.currentIsInterim ? this.current.text : ''}${fragment}` };
     this.currentIsInterim = false;
     if (role === 'user') this.callerWords += fragment;
-    this.send({ type: 'transcript', role, text: this.current.text, final: false });
+    const visibleText = role === 'user' ? redactUnnecessaryDateOfBirth(this.current.text) : this.current.text;
+    this.send({ type: 'transcript', role, text: visibleText, final: false });
   }
 
   private flushTranscript(): void {
@@ -826,9 +837,10 @@ export class VoiceSession {
     const wasInterim = this.currentIsInterim;
     this.current = null;
     this.currentIsInterim = false;
-    if (!text.trim() || wasInterim) return;
-    this.log.push({ role, text: text.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
-    this.send({ type: 'transcript', role, text, final: true });
+    const visibleText = role === 'user' ? redactUnnecessaryDateOfBirth(text) : text;
+    if (!visibleText.trim() || wasInterim) return;
+    this.log.push({ role, text: visibleText.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
+    this.send({ type: 'transcript', role, text: visibleText, final: true });
   }
 
   /**

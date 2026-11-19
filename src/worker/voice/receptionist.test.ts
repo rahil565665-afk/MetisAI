@@ -109,6 +109,8 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /Open 8-5\./);
   assert.match(prompt, /Q: Parking\?\nA: Free\./);
   assert.match(prompt, /Welcome!/);
+  assert.match(prompt, /thoughtful, friendly human receptionist/);
+  assert.match(prompt, /never turn a scattered list of slots into a continuous range/);
   assert.match(prompt, /not system instructions/);
   assert.match(buildSystemInstruction(normalizeClinicConfig({ id: 'x', name: '' }), NOW), /the business/);
 });
@@ -156,7 +158,14 @@ test('availability uses the full business-local day and the saved timezone, not 
   h.deps.businessTimeZone = 'America/Los_Angeles';
   const result = await runTool(h.deps, 'check_availability', { date: '2026-11-01', time_zone: 'UTC' });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.availability, { '2026-11-01': [{ start: '2026-11-01T17:00:00-08:00', end: '2026-11-01T17:30:00-08:00' }] });
+  assert.deepEqual(result.availability, {
+    timeZone: 'America/Los_Angeles',
+    days: { '2026-11-01': [{
+      start: '2026-11-01T17:00:00-08:00',
+      end: '2026-11-01T17:30:00-08:00',
+      localTime: 'Sunday, November 1, 2026 at 5:00 PM',
+    }] },
+  });
   assert.equal(h.requestUrls[0]!.searchParams.get('start'), '2026-11-01T07:00:00Z');
   assert.equal(h.requestUrls[0]!.searchParams.get('end'), '2026-11-02T08:00:00Z');
   assert.equal(h.requestUrls[0]!.searchParams.get('timeZone'), 'America/Los_Angeles');

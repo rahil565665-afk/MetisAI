@@ -352,12 +352,13 @@ export class VoiceSession {
       void this.finish('service', 'The browser sent an invalid audio frame.');
       return;
     }
-    // Audio sent before Gemini accepts the setup message is dropped, never queued.
+    // Audio sent before the conversational agent is ready is dropped, never queued.
+    // Once ready, duplicate the same PCM frame to the dedicated recognizer when available.
     if (this.ready && this.gemini) {
-      // Transcription can lag behind the actual audio. Real speech energy should keep
-      // an active caller from being mistaken for an idle connection.
       if (hasVoiceActivity(bytes)) this.touch();
-      this.sendGemini(audioChunkMessage(bytesToBase64(bytes)));
+      const encoded = bytesToBase64(bytes);
+      this.sendGemini(audioChunkMessage(encoded));
+      if (this.transcriberReady) this.sendTranscriberAudio(encoded);
     }
   }
 
@@ -403,6 +404,188 @@ export class VoiceSession {
     } catch {
       // A failed send means the socket is closing; its close handler deals with it.
     }
+  }
+
+  private sendTranscriberAudio(base64: string): void {
+    try {
+      this.transcriber?.send(JSON.stringify(audioChunkMessage(base64)));
+    } catch {
+      // ASR can recover independently; never let it end the conversation.
+    }
+  }
+
+  /** Start the dedicated recognizer. Failure only switches captions to native Live transcription. */
+  private async startTranscription(): Promise<void> {
+    if (!this.deps.connectTranscriber || this.finished) return;
+    const connected = await this.openTranscriberConnection();
+    if (connected || this.finished) return;
+    this.transcriberUnavailable = true;
+    this.transcriberNotice = 'Enhanced speech recognition is reconnecting; the voice conversation can continue.';
+    this.completeReady();
+    this.updateNotice();
+    void this.reconnectTranscriber();
+  }
+
+  /** Open one clean Transcribe Live stream and wait briefly for setupComplete. */
+  private async openTranscriberConnection(): Promise<boolean> {
+    const connect = this.deps.connectTranscriber;
+    const prepared = this.prepared;
+    if (!connect || !prepared || this.finished) return false;
+    let socket: VoiceSocket;
+    try {
+      socket = await connect(prepared.geminiApiKey);
+    } catch {
+      return false;
+    }
+    if (this.finished) {
+      this.closeQuietly(socket, NORMAL_CLOSE, 'Call ended');
+      return false;
+    }
+    this.transcriber = socket;
+    this.transcriberReady = false;
+    this.attachTranscriber(socket);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(this.transcriberSetupTimer);
+        this.transcriberSetupTimer = undefined;
+        if (this.settleTranscriberSetup === settle) this.settleTranscriberSetup = null;
+        resolve(ok);
+      };
+      this.settleTranscriberSetup = settle;
+      this.transcriberSetupTimer = setTimeout(() => {
+        if (this.transcriber === socket) {
+          this.transcriber = null;
+          this.transcriberReady = false;
+          this.closeQuietly(socket, NORMAL_CLOSE, 'Transcriber setup timed out');
+        }
+        settle(false);
+      }, this.limits.setupTimeoutMs);
+      try {
+        socket.send(JSON.stringify(transcriptionSetupMessage({
+          languageCodes: this.deps.transcriptionLanguageCodes ?? [],
+          customVocabulary: receptionistTranscriptionVocabulary(prepared.config),
+        })));
+      } catch {
+        if (this.transcriber === socket) this.transcriber = null;
+        this.closeQuietly(socket, NORMAL_CLOSE, 'Transcriber setup failed');
+        settle(false);
+      }
+    });
+  }
+
+  private attachTranscriber(socket: VoiceSocket): void {
+    socket.addEventListener('message', (event) => this.onTranscriberMessage(socket, event.data));
+    socket.addEventListener('close', () => this.onTranscriberClosed(socket));
+    socket.addEventListener('error', () => this.onTranscriberClosed(socket));
+  }
+
+  private onTranscriberMessage(socket: VoiceSocket, data: unknown): void {
+    if (this.finished || socket !== this.transcriber) return;
+    if (typeof data !== 'string' && !isBinary(data)) {
+      this.warnUnsupportedFrame();
+      return;
+    }
+    for (const event of parseServerMessage(data)) {
+      if (this.finished || socket !== this.transcriber) return;
+      switch (event.kind) {
+        case 'setupComplete':
+          this.transcriberReady = true;
+          this.transcriberUnavailable = false;
+          this.transcriberNotice = '';
+          this.settleTranscriberSetup?.(true);
+          this.completeReady();
+          this.updateNotice();
+          break;
+        case 'interimInputTranscript':
+          this.touch();
+          this.updateInterimUserTranscript(event.text);
+          break;
+        case 'inputTranscript':
+          this.touch();
+          this.commitUserTranscript(event.text);
+          break;
+        case 'goAway':
+          // Transcribe Live sessions are short-lived; refresh independently of the voice agent.
+          this.closeQuietly(socket, NORMAL_CLOSE, 'Refresh transcription stream');
+          break;
+        case 'error':
+          console.error('[voice-session] transcription sidecar reported an error');
+          this.closeQuietly(socket, SERVICE_CLOSE, 'Transcription sidecar error');
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  private onTranscriberClosed(socket: VoiceSocket): void {
+    if (socket !== this.transcriber) return;
+    const wasReady = this.transcriberReady;
+    this.transcriber = null;
+    this.transcriberReady = false;
+    this.transcriberUnavailable = true;
+    this.settleTranscriberSetup?.(false);
+    if (this.finished) return;
+    this.transcriberNotice = 'Enhanced speech recognition disconnected; the call is continuing with fallback transcription.';
+    this.completeReady();
+    this.updateNotice();
+    if (wasReady && this.ready) void this.reconnectTranscriber();
+  }
+
+  /** Recover only the recognizer; never close or restart the live conversation because ASR dropped. */
+  private async reconnectTranscriber(): Promise<void> {
+    if (this.transcriberReconnecting || this.finished || !this.deps.connectTranscriber) return;
+    this.transcriberReconnecting = true;
+    try {
+      for (let attempt = 1; attempt <= 2 && !this.finished; attempt += 1) {
+        if (attempt > 1) await pause(750 * attempt);
+        if (this.finished) return;
+        if (await this.openTranscriberConnection()) {
+          this.transcriberUnavailable = false;
+          this.transcriberNotice = '';
+          this.updateNotice();
+          return;
+        }
+        console.error('[voice-session] transcription reconnect failed', attempt);
+      }
+      this.transcriberNotice = 'Enhanced speech recognition is unavailable for this call. The voice assistant is still connected.';
+      this.transcriberUnavailable = true;
+      this.updateNotice();
+    } finally {
+      this.transcriberReconnecting = false;
+    }
+  }
+
+  /** Interim hypotheses replace one another; they are never used to authorize a booking. */
+  private updateInterimUserTranscript(text: string): void {
+    const value = text.trim();
+    if (!value) return;
+    if (this.current && this.current.role !== 'user') this.flushTranscript();
+    this.current = { role: 'user', text: value };
+    this.send({ type: 'transcript', role: 'user', text: value, final: false });
+  }
+
+  /** Commit one exact final ASR segment for the transcript and booking-confirmation guard. */
+  private commitUserTranscript(text: string): void {
+    const value = text.trim();
+    if (!value) return;
+    if (this.current && this.current.role !== 'user') this.flushTranscript();
+    this.current = null;
+    this.log.push({ role: 'user', text: value.slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
+    this.callerWords = (this.callerWords ? this.callerWords + ' ' : '') + value;
+    this.send({ type: 'transcript', role: 'user', text: value, final: true });
+  }
+
+  private completeReady(): void {
+    if (this.ready || !this.agentReady || (!this.transcriberReady && !this.transcriberUnavailable)) return;
+    this.ready = true;
+    clearTimeout(this.setupTimer);
+    this.touch();
+    this.send({ type: 'ready' });
+    this.sendGemini(textInputMessage(GREETING_TRIGGER));
   }
 
   private onGeminiMessage(socket: VoiceSocket, data: unknown): void {

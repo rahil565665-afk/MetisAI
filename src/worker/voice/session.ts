@@ -366,8 +366,13 @@ export class VoiceSession {
     if (this.ready && this.gemini) {
       if (hasVoiceActivity(bytes)) this.touch();
       const encoded = bytesToBase64(bytes);
-      this.sendGemini(audioChunkMessage(encoded));
-      if (this.transcriberReady) this.sendTranscriberAudio(encoded);
+      if (this.transcriberReady) {
+        // Dedicated ASR is the authoritative input path; the Live model receives its finalized text.
+        this.sendTranscriberAudio(encoded);
+      } else {
+        // Fallback to native audio understanding only while the dedicated recognizer is unavailable.
+        this.sendGemini(audioChunkMessage(encoded));
+      }
     }
   }
 
@@ -590,6 +595,9 @@ export class VoiceSession {
     this.log.push({ role: 'user', text: value.slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
     this.callerWords = (this.callerWords ? this.callerWords + ' ' : '') + value;
     this.send({ type: 'transcript', role: 'user', text: value, final: true });
+    // Feed the verbatim ASR result into the speech-to-speech agent so it can act on
+    // the same words shown to the receptionist, rather than running a second ASR path.
+    this.sendGemini(textInputMessage(value));
   }
 
   private completeReady(): void {

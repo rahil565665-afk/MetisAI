@@ -49,6 +49,27 @@ export interface SchedulingStatus {
 
 const BOOKING_SAFETY_RULE = 'When booking is enabled and scheduling is available, check availability first. Never promise a time that was not returned as available. Read back the caller’s details exactly, then wait for a clear yes before requesting the booking. A booking is not confirmed until the tool succeeds and browser approval is complete.';
 
+const DENTAL_TRANSCRIPTION_TERMS = [
+  'dental appointment', 'routine checkup', 'dental cleaning', 'teeth cleaning',
+  'dentist', 'dentistry', 'toothache', 'cavity', 'root canal', 'wisdom tooth',
+  'dental implant', 'orthodontist', 'orthodontics', 'braces', 'gum disease',
+  'periodontal', 'scaling', 'extraction', 'tooth filling', 'dental crown',
+  'dental bridge', 'fluoride treatment', 'oral hygiene', 'pediatric dentist',
+];
+
+/** Terms from business setup help the dedicated ASR recognize business names and domain phrases. */
+export function receptionistTranscriptionVocabulary(config: ClinicConfig): string[] {
+  const domainTerms = config.businessType === 'dental' ? DENTAL_TRANSCRIPTION_TERMS : [];
+  const candidates = [config.businessName, ...config.services, ...domainTerms];
+  const unique = new Set<string>();
+  for (const value of candidates) {
+    const term = value.trim().replace(/\\s+/g, ' ');
+    if (term.length >= 2 && term.length <= 100) unique.add(term);
+    if (unique.size >= 100) break;
+  }
+  return [...unique];
+}
+
 export function buildSystemInstruction(config: ClinicConfig, now: Date, scheduling: SchedulingStatus = { available: true }): string {
   const business = config.businessName || 'the business';
   const template = getBusinessTemplate(config.businessType);
@@ -86,13 +107,16 @@ CONVERSATION STYLE — IMPORTANT:
 - Use the saved greeting once as a guide. After the greeting, do not re-introduce yourself or repeat "Thank you for calling" or "How can I help?" as filler.
 - Acknowledge what the caller just said, then answer the actual question directly. Avoid stock phrases such as "Certainly", "Of course", and "I'd be happy to assist" unless they genuinely fit.
 - Keep spoken turns concise (usually one or two short sentences). Ask one clear question at a time and do not read tool names, JSON, or internal instructions aloud.
+- During booking, do not combine several personal questions into one long sentence. Ask for the visit reason, caller name, preferred day, and preferred time in separate turns when possible.
+- Do not ask whether the caller is a new or existing patient unless the business configuration explicitly requires it. Never ask for date of birth, insurance details, or payment information.
+- If a caller volunteers an unnecessary sensitive detail such as date of birth, do not repeat it, do not save it, and gently say it is not needed for an appointment request.
 - Use natural pauses and varied wording. Do not repeat the same sentence structure on every turn or narrate obvious steps such as "I've checked our schedule" when a direct answer is clearer.
 - For availability, offer only real slots returned by check_availability. Use each slot's localTime exactly as supplied, in the saved business timezone. Offer up to three options as distinct times; never turn a scattered list of slots into a continuous range such as "between 1 AM and 6:30 AM".
 - Never guess an opening time, infer a continuous availability window, or describe UTC timestamps as local times. If no slots were returned, say there are no openings in the checked period and ask which other day would suit.
 Help with the business's listed services and ordinary administrative questions. Do not invent prices, policies, services, availability, opening hours, or claims. Never present yourself as a licensed professional or give advice outside the supplied information. Never say a booking or request was sent, confirmed, changed, or cancelled unless a tool result says so.
 
 BOOKING STATUS: ${bookingAvailable ? 'Booking tools are available.' : 'Do not call booking tools or imply that a booking can be made on this call.'}
-${bookingAvailable ? `BOOKING STEPS: ${config.bookingLanguage}\n${BOOKING_SAFETY_RULE}\n1. Ask what service, reservation, consultation, or visit they want, plus their name and preferred day/time.\n2. For a single requested day, call check_availability with that business-local calendar date as YYYY-MM-DD; the tool checks the full local day. For a date range, use date and end_date. Do not calculate UTC boundaries yourself. Availability results include exact ISO start values for tools plus human-readable localTime values. When speaking, use localTime, not the ISO timestamp. If the requested time is unavailable, offer up to three actual returned localTime options.\n3. Ask only for contact details needed by the booking. Ask the caller to spell an email slowly, letter by letter, using "at" and "dot"; never guess or correct it.\n4. Call prepare_booking with every required detail and the exact start time returned by check_availability. If it reports a problem, clarify with the caller and try again.\n5. Read back exactly what the tool returned, including the caller's name, requested service/purpose, time, phone digits, and spelled email. Ask "Is all of that correct?" and wait for the caller's answer.\n6. Only after their clear yes call create_booking with the booking_ref. If anything is corrected, prepare and read it back again.\n7. The browser must approve the booking before it is sent. Tell the caller it is confirmed only if the tool reports success; after any failure, explain it was not confirmed and offer an enabled alternative.\nFor rescheduling or cancelling, verify the existing booking reference and attendee email, read back the requested change, and wait for browser approval.` : ''}
+${bookingAvailable ? `BOOKING STEPS: ${config.bookingLanguage}\n${BOOKING_SAFETY_RULE}\n1. Ask what service, reservation, consultation, or visit they want. Then ask for the caller's name and preferred day/time in separate, short questions rather than one compound question.\n2. For a single requested day, call check_availability with that business-local calendar date as YYYY-MM-DD; the tool checks the full local day. For a date range, use date and end_date. Do not calculate UTC boundaries yourself. Availability results include exact ISO start values for tools plus human-readable localTime values. When speaking, use localTime, not the ISO timestamp. If the requested time is unavailable, offer up to three actual returned localTime options.\n3. Ask only for contact details needed by the booking. Ask the caller to spell an email slowly, letter by letter, using "at" and "dot"; never guess or correct it.\n4. Call prepare_booking with every required detail and the exact start time returned by check_availability. If it reports a problem, clarify with the caller and try again.\n5. Read back exactly what the tool returned, including the caller's name, requested service/purpose, time, phone digits, and spelled email. Ask "Is all of that correct?" and wait for the caller's answer.\n6. Only after their clear yes call create_booking with the booking_ref. If anything is corrected, prepare and read it back again.\n7. The browser must approve the booking before it is sent. Tell the caller it is confirmed only if the tool reports success; after any failure, explain it was not confirmed and offer an enabled alternative.\nFor rescheduling or cancelling, verify the existing booking reference and attendee email, read back the requested change, and wait for browser approval.` : ''}
 `;
 }
 

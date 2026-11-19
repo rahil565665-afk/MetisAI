@@ -210,6 +210,7 @@ export class VoiceSession {
   private setupTimer: ReturnType<typeof setTimeout> | undefined;
   private idleTimer: ReturnType<typeof setInterval> | undefined;
   private current: { role: 'user' | 'assistant'; text: string } | null = null;
+  private currentIsInterim = false;
   private readonly cancelledCalls = new Set<string>();
   private toolChain: Promise<void> = Promise.resolve();
   private resolveDone!: () => void;
@@ -565,6 +566,7 @@ export class VoiceSession {
     if (!value) return;
     if (this.current && this.current.role !== 'user') this.flushTranscript();
     this.current = { role: 'user', text: value };
+    this.currentIsInterim = true;
     this.send({ type: 'transcript', role: 'user', text: value, final: false });
   }
 
@@ -574,6 +576,7 @@ export class VoiceSession {
     if (!value) return;
     if (this.current && this.current.role !== 'user') this.flushTranscript();
     this.current = null;
+    this.currentIsInterim = false;
     this.log.push({ role: 'user', text: value.slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
     this.callerWords = (this.callerWords ? this.callerWords + ' ' : '') + value;
     this.send({ type: 'transcript', role: 'user', text: value, final: true });
@@ -748,12 +751,8 @@ export class VoiceSession {
   private onGeminiEvent(event: GeminiEvent): void {
     switch (event.kind) {
       case 'setupComplete':
-        if (this.ready) return;
-        this.ready = true;
-        clearTimeout(this.setupTimer);
-        this.touch();
-        this.send({ type: 'ready' });
-        this.sendGemini(textInputMessage(GREETING_TRIGGER));
+        this.agentReady = true;
+        this.completeReady();
         return;
       case 'interrupted':
         this.flushTranscript();
@@ -767,9 +766,13 @@ export class VoiceSession {
         console.error('[voice-session] unexpected audio format', event.mimeType);
         void this.finish('service', 'The voice service returned audio in an unsupported format.');
         return;
+      case 'interimInputTranscript':
+        // The dedicated recognizer is the source of truth whenever it is connected.
+        if (!this.transcriberReady) this.updateInterimUserTranscript(event.text);
+        return;
       case 'inputTranscript':
         this.touch();
-        this.appendTranscript('user', event.text);
+        if (!this.transcriberReady) this.appendTranscript('user', event.text);
         return;
       case 'outputTranscript':
         this.touch();
@@ -811,7 +814,8 @@ export class VoiceSession {
 
   private appendTranscript(role: 'user' | 'assistant', fragment: string): void {
     if (this.current && this.current.role !== role) this.flushTranscript();
-    this.current = { role, text: `${this.current?.text ?? ''}${fragment}` };
+    this.current = { role, text: `${this.current?.role === role && !this.currentIsInterim ? this.current.text : ''}${fragment}` };
+    this.currentIsInterim = false;
     if (role === 'user') this.callerWords += fragment;
     this.send({ type: 'transcript', role, text: this.current.text, final: false });
   }
@@ -819,8 +823,10 @@ export class VoiceSession {
   private flushTranscript(): void {
     if (!this.current) return;
     const { role, text } = this.current;
+    const wasInterim = this.currentIsInterim;
     this.current = null;
-    if (!text.trim()) return;
+    this.currentIsInterim = false;
+    if (!text.trim() || wasInterim) return;
     this.log.push({ role, text: text.trim().slice(0, MAX_TURN_CHARS), at: this.now().toISOString() });
     this.send({ type: 'transcript', role, text, final: true });
   }
@@ -913,6 +919,7 @@ export class VoiceSession {
     if (this.finished) return;
     let message = '';
     if (this.ready && !this.gemini) message = RECONNECT_NOTICE;
+    else if (this.transcriberNotice) message = this.transcriberNotice;
     else if (this.warnedLimit) message = LIMIT_NOTICE;
     else if (this.endingSoon) message = ENDING_NOTICE;
     else if (this.warnedIdle) message = IDLE_NOTICE;
@@ -935,6 +942,13 @@ export class VoiceSession {
     clearTimeout(this.deadlineTimer);
     clearTimeout(this.setupTimer);
     clearInterval(this.idleTimer);
+    clearTimeout(this.transcriberSetupTimer);
+    this.transcriberSetupTimer = undefined;
+    this.settleTranscriberSetup?.(false);
+    this.settleTranscriberSetup = null;
+    if (this.transcriber) this.closeQuietly(this.transcriber, NORMAL_CLOSE, 'Call ended');
+    this.transcriber = null;
+    this.transcriberReady = false;
     if (this.pending) this.closeQuietly(this.pending, NORMAL_CLOSE, 'Call ended');
     this.pending = null;
     this.settlePending(false);

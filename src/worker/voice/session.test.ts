@@ -68,7 +68,7 @@ function rig(options: { createProblem?: string; updateFails?: boolean; schedulin
     const next = queue.shift();
     return new Response(JSON.stringify(next ?? { status: 'error' }), { status: next ? 200 : 500 });
   };
-  const config = normalizeClinicConfig({ id: 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4', name: 'Northside Dental', timezone: 'UTC', receptionist_config: { greeting: 'Welcome!' } });
+  const config = normalizeClinicConfig({ id: 'b1f05d7f-923b-4a9c-80bf-1c1b21e2b7c4', name: 'Northside Dental', business_type: 'dental_clinic', timezone: 'UTC', receptionist_config: { greeting: 'Welcome!' } });
   const connectedWith: string[] = [];
   const transcriberConnections = [options.transcriber, ...(options.moreTranscribers ?? [])].filter((socket): socket is FakeSocket => Boolean(socket));
   const session = new VoiceSession({

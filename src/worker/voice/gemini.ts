@@ -7,7 +7,8 @@ import { frameToText, type FrameData } from './encoding.js';
  */
 
 export const DEFAULT_GEMINI_LIVE_MODEL = 'models/gemini-3.8-live';
-export const DEFAULT_VOICE_NAME = 'Charon';
+export const DEFAULT_VOICE_NAME = 'Sulafat';
+export const DEFAULT_LANGUAGE_CODE = 'en-IN';
 export const GEMINI_LIVE_ORIGIN = 'https://generativelanguage.googleapis.com';
 const GEMINI_LIVE_PATH = '/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 export const INPUT_AUDIO_MIME = 'audio/pcm;rate=16000';
@@ -27,6 +28,8 @@ export interface FunctionDeclaration {
 export interface SetupOptions {
   model: string;
   voiceName: string;
+  /** BCP-47 language hint for speech recognition and generated speech. */
+  languageCode?: string;
   systemInstruction: string;
   tools: FunctionDeclaration[];
   /** Continue an earlier session instead of starting a fresh one. */
@@ -45,12 +48,17 @@ export function setupMessage(options: SetupOptions): Record<string, unknown> {
       model: options.model,
       generationConfig: {
         responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: options.voiceName } } },
+        speechConfig: {
+          languageCode: options.languageCode ?? DEFAULT_LANGUAGE_CODE,
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: options.voiceName } },
+        },
       },
       systemInstruction: { parts: [{ text: options.systemInstruction }] },
       tools: [{ functionDeclarations: options.tools }],
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
+      // The language hint helps the recognizer with regional pronunciation while
+      // leaving the audio itself available to Gemini's native multimodal model.
+      inputAudioTranscription: { languageCodes: [options.languageCode ?? DEFAULT_LANGUAGE_CODE] },
+      outputAudioTranscription: { languageCodes: [options.languageCode ?? DEFAULT_LANGUAGE_CODE] },
       ...(options.longSession === false ? {} : {
         sessionResumption: options.resumeHandle ? { handle: options.resumeHandle } : {},
         contextWindowCompression: { slidingWindow: {} },
@@ -189,11 +197,14 @@ const MODEL_PATTERN = /^models\/[A-Za-z0-9._-]{1,80}$/;
 const VOICE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{1,29}$/;
 
 /** Optional, non-secret overrides so a model or voice rename never needs a code change. */
-export function geminiSettings(source: Record<string, string | undefined>): { model: string; voiceName: string } {
+export function geminiSettings(source: Record<string, string | undefined>): { model: string; voiceName: string; languageCode: string } {
   const model = source.GEMINI_LIVE_MODEL?.trim();
   const voice = source.GEMINI_VOICE_NAME?.trim();
+  const language = source.GEMINI_LANGUAGE_CODE?.trim();
+  const languagePattern = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
   return {
     model: model && MODEL_PATTERN.test(model) ? model : DEFAULT_GEMINI_LIVE_MODEL,
     voiceName: voice && VOICE_PATTERN.test(voice) ? voice : DEFAULT_VOICE_NAME,
+    languageCode: language && languagePattern.test(language) ? language : DEFAULT_LANGUAGE_CODE,
   };
 }

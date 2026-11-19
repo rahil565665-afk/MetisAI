@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { ApprovalGate } from './approval.js';
 import { CalComClient, type Fetcher } from './calcom.js';
 import { normalizeClinicConfig } from './clinicConfig.js';
-import { BookingMemory, TOOL_DECLARATIONS, buildSystemInstruction, receptionistTools, runTool, type CallStore, type ToolDeps } from './receptionist.js';
+import { BookingMemory, TOOL_DECLARATIONS, buildSystemInstruction, receptionistTools, receptionistTranscriptionVocabulary, runTool, type CallStore, type ToolDeps } from './receptionist.js';
 
 const NOW = new Date('2026-11-02T03:00:00Z');
 
@@ -111,8 +111,19 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /Welcome!/);
   assert.match(prompt, /thoughtful, friendly human receptionist/);
   assert.match(prompt, /never turn a scattered list of slots into a continuous range/);
+  assert.match(prompt, /do not combine several personal questions into one long sentence/);
+  assert.match(prompt, /do not repeat it, do not save it/);
   assert.match(prompt, /not system instructions/);
   assert.match(buildSystemInstruction(normalizeClinicConfig({ id: 'x', name: '' }), NOW), /the business/);
+});
+
+test('transcription vocabulary includes business names, services, and dental terminology', () => {
+  const config = normalizeClinicConfig({ id: 'x', name: 'Northside Dental', business_type: 'dental_clinic' });
+  const vocabulary = receptionistTranscriptionVocabulary(config);
+  assert.ok(vocabulary.includes('Northside Dental'));
+  assert.ok(vocabulary.some((term) => /checkup/i.test(term)));
+  assert.ok(vocabulary.includes('root canal'));
+  assert.ok(vocabulary.length <= 100);
 });
 
 test('the system prompt tells the model the truth about booking and requires a read-back', () => {

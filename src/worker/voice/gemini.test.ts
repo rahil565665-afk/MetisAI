@@ -53,9 +53,15 @@ test('the dedicated Transcribe Live setup requests verbatim text with language a
   assert.equal(setup.setup.model, DEFAULT_TRANSCRIBER_MODEL);
   assert.deepEqual(setup.setup.generationConfig.responseModalities, ['TEXT']);
   assert.deepEqual(setup.setup.inputAudioTranscription, {
-    languageCodes: ['en-IN', 'hi-IN'],
+    languageCodes: [DEFAULT_LANGUAGE_CODE],
     customVocabulary: ['Northside Dental', 'routine checkup'],
     mode: 'VERBATIM',
+  });
+  assert.deepEqual(setup.setup.realtimeInputConfig.automaticActivityDetection, {
+    startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+    endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+    prefixPaddingMs: 200,
+    silenceDurationMs: 650,
   });
   assert.equal(setup.setup.tools, undefined);
 });
@@ -116,10 +122,10 @@ test('errors, goAway and garbage', () => {
   assert.deepEqual(parseServerMessage('{"usageMetadata":{}}'), []);
 });
 
-test('model and voice overrides are validated', () => {
-  assert.deepEqual(geminiSettings({}), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [] });
-  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'models/gemini-next-live', GEMINI_VOICE_NAME: 'Puck', GEMINI_LANGUAGE_CODE: 'en-US', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,es-US' }), { model: 'models/gemini-next-live', voiceName: 'Puck', languageCode: 'en-US', transcriptionLanguageCodes: ['en-US', 'es-US'] });
-  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'gemini-without-prefix', GEMINI_VOICE_NAME: 'not a voice!', GEMINI_LANGUAGE_CODE: 'not a language!', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,invalid code' }), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [] });
+test('model and voice overrides are validated while speech stays English-only', () => {
+  assert.deepEqual(geminiSettings({}), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [DEFAULT_LANGUAGE_CODE] });
+  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'models/gemini-next-live', GEMINI_VOICE_NAME: 'Puck', GEMINI_LANGUAGE_CODE: 'es-ES', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,es-US' }), { model: 'models/gemini-next-live', voiceName: 'Puck', languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [DEFAULT_LANGUAGE_CODE] });
+  assert.deepEqual(geminiSettings({ GEMINI_LIVE_MODEL: 'gemini-without-prefix', GEMINI_VOICE_NAME: 'not a voice!', GEMINI_LANGUAGE_CODE: 'not a language!', GEMINI_TRANSCRIPTION_LANGUAGE_CODES: 'en-US,invalid code' }), { model: DEFAULT_GEMINI_LIVE_MODEL, voiceName: DEFAULT_VOICE_NAME, languageCode: DEFAULT_LANGUAGE_CODE, transcriptionLanguageCodes: [DEFAULT_LANGUAGE_CODE] });
 });
 
 test('resumption updates carry the newest handle, and only count as resumable with one', () => {

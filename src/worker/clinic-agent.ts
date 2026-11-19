@@ -133,6 +133,7 @@ export class ClinicAgent extends DurableObject<ClinicAgentEnv> {
       connectGemini: openGeminiSocket,
       model: settings.model,
       voiceName: settings.voiceName,
+      languageCode: settings.languageCode,
     });
     this.session = session;
     // The call is written to the clinic's history after the browser disconnects, so keep this object alive for it.

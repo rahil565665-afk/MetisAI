@@ -10,4 +10,7 @@ APP_PUBLIC_URL=http://localhost:8787
 # Set GEMINI_LANGUAGE_CODE to match the primary caller language, e.g. en-US, hi-IN, ta-IN.
 # GEMINI_LIVE_MODEL=models/gemini-3.8-live
 # GEMINI_VOICE_NAME=Sulafat
+# Voice language, such as en-IN or hi-IN:
 # GEMINI_LANGUAGE_CODE=en-IN
+# Optional Transcribe Live recognition-language hints, comma-separated. Leave unset for auto-detection.
+# Example for bilingual callers: GEMINI_TRANSCRIPTION_LANGUAGE_CODES=en-IN,hi-IN

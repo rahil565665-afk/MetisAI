@@ -76,6 +76,8 @@ export interface SessionLimits {
   warnMs: number;
   /** How many times a dropped Gemini connection is re-opened (resuming the same conversation). */
   maxReconnects: number;
+  /** Safe clean-session retries after resumption fails, only before any side effect may have started. */
+  maxFreshReconnects: number;
   /** Base pause between reconnect attempts; grows with each attempt. */
   reconnectDelayMs: number;
 }
@@ -89,6 +91,7 @@ export const DEFAULT_LIMITS: SessionLimits = {
   answerWaitMs: 2_500,
   warnMs: 30_000,
   maxReconnects: 3,
+  maxFreshReconnects: 2,
   reconnectDelayMs: 500,
 };
 
@@ -98,6 +101,8 @@ export interface SessionDeps {
   connectGemini(apiKey: string): Promise<VoiceSocket>;
   model: string;
   voiceName: string;
+  /** BCP-47 language hint passed to Gemini Live. */
+  languageCode?: string;
   now?: () => Date;
   limits?: Partial<SessionLimits>;
   approvalTimeoutMs?: number;
@@ -127,6 +132,20 @@ const MAX_EVENTS = 100;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const RECOVERY_TRIGGER = 'INTERNAL RECOVERY CUE: the voice service briefly disconnected. Apologize once and ask the caller to repeat their last request.';
 const MUTATING_TOOLS = new Set(['create_booking', 'reschedule_booking', 'cancel_booking', 'leave_message_for_staff', 'request_human_transfer']);
+const USER_SPEECH_RMS_THRESHOLD = 0.015;
+
+/** True when an incoming PCM frame contains speech-like energy, not just microphone silence. */
+function hasVoiceActivity(bytes: Uint8Array): boolean {
+  const samples = Math.floor(bytes.byteLength / 2);
+  if (samples === 0) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sumSquares = 0;
+  for (let index = 0; index < samples; index += 1) {
+    const sample = view.getInt16(index * 2, true) / 32768;
+    sumSquares += sample * sample;
+  }
+  return Math.sqrt(sumSquares / samples) >= USER_SPEECH_RMS_THRESHOLD;
+}
 
 /**
  * One browser test call: the browser's microphone audio goes to Gemini Live, Gemini's spoken reply
@@ -267,6 +286,7 @@ export class VoiceSession {
       tools: receptionistTools(prepared.config, this.scheduling()),
       resumeHandle,
       longSession: this.longSession,
+      languageCode: this.deps.languageCode,
     }));
   }
 
@@ -316,7 +336,12 @@ export class VoiceSession {
       return;
     }
     // Audio sent before Gemini accepts the setup message is dropped, never queued.
-    if (this.ready && this.gemini) this.sendGemini(audioChunkMessage(bytesToBase64(bytes)));
+    if (this.ready && this.gemini) {
+      // Transcription can lag behind the actual audio. Real speech energy should keep
+      // an active caller from being mistaken for an idle connection.
+      if (hasVoiceActivity(bytes)) this.touch();
+      this.sendGemini(audioChunkMessage(bytesToBase64(bytes)));
+    }
   }
 
   private warnedFrames = false;
@@ -432,11 +457,24 @@ export class VoiceSession {
         console.error('[voice-session] reconnect attempt failed', attempt, cause);
       }
       if (!this.finished && !this.gemini) {
-        if (!this.mutationAttempted && await this.openReplacement(null, true)) return;
-        const failure = this.mutationAttempted
-          ? `The voice service disconnected while a booking, message, or handoff may have been processing. Check Call activity and the connected service before trying again${detail ? ` (${detail})` : ''}.`
-          : `The voice service connection was lost and could not be restored${detail}. Try again.`;
-        await this.finish('service', failure);
+        let recovered = false;
+        if (!this.mutationAttempted) {
+          for (let attempt = 1; attempt <= this.limits.maxFreshReconnects && !this.finished; attempt += 1) {
+            if (attempt > 1) await pause(this.limits.reconnectDelayMs * attempt);
+            if (this.finished) return;
+            if (await this.openReplacement(null, true)) {
+              recovered = true;
+              break;
+            }
+            console.error('[voice-session] fresh recovery attempt failed', attempt, cause);
+          }
+        }
+        if (!recovered && !this.finished) {
+          const failure = this.mutationAttempted
+            ? `The voice service disconnected while a booking, message, or handoff may have been processing. Check Call activity and the connected service before trying again${detail ? ` (${detail})` : ''}.`
+            : `The voice service connection was lost and could not be restored${detail}. Try again.`;
+          await this.finish('service', failure);
+        }
       }
     } finally {
       this.reconnecting = false;
@@ -542,7 +580,8 @@ export class VoiceSession {
         this.send({ type: 'turn_complete' });
         return;
       case 'resumption':
-        if (event.resumable && event.handle) this.resumeHandle = event.handle;
+        // A non-resumable update invalidates the previous handle; never retry a stale one.
+        this.resumeHandle = event.resumable && event.handle ? event.handle : null;
         return;
       case 'toolCall': {
         this.touch();

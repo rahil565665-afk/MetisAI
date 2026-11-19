@@ -9,6 +9,7 @@ import { frameToText, type FrameData } from './encoding.js';
 export const DEFAULT_GEMINI_LIVE_MODEL = 'models/gemini-3.8-live';
 export const DEFAULT_VOICE_NAME = 'Sulafat';
 export const DEFAULT_LANGUAGE_CODE = 'en-IN';
+export const DEFAULT_TRANSCRIBER_MODEL = 'models/gemini-3.5-transcribe-live';
 export const GEMINI_LIVE_ORIGIN = 'https://generativelanguage.googleapis.com';
 const GEMINI_LIVE_PATH = '/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 export const INPUT_AUDIO_MIME = 'audio/pcm;rate=16000';
@@ -67,6 +68,26 @@ export function setupMessage(options: SetupOptions): Record<string, unknown> {
   };
 }
 
+export interface TranscriptionSetupOptions {
+  languageCodes: string[];
+  customVocabulary: string[];
+}
+
+/** Dedicated, streaming ASR session, separate from the speech-to-speech agent. */
+export function transcriptionSetupMessage(options: TranscriptionSetupOptions): Record<string, unknown> {
+  return {
+    setup: {
+      model: DEFAULT_TRANSCRIBER_MODEL,
+      generationConfig: { responseModalities: ['TEXT'] },
+      inputAudioTranscription: {
+        languageCodes: options.languageCodes,
+        customVocabulary: options.customVocabulary.slice(0, 100),
+        mode: 'VERBATIM',
+      },
+    },
+  };
+}
+
 export function audioChunkMessage(base64: string): Record<string, unknown> {
   return { realtimeInput: { audio: { data: base64, mimeType: INPUT_AUDIO_MIME } } };
 }
@@ -96,6 +117,7 @@ export type GeminiEvent =
   | { kind: 'interrupted' }
   | { kind: 'audio'; data: string }
   | { kind: 'badAudioFormat'; mimeType: string }
+  | { kind: 'interimInputTranscript'; text: string }
   | { kind: 'inputTranscript'; text: string }
   | { kind: 'outputTranscript'; text: string }
   | { kind: 'turnComplete' }
@@ -162,6 +184,8 @@ export function parseServerMessage(data: FrameData): GeminiEvent[] {
         else events.push({ kind: 'badAudioFormat', mimeType: mimeType.slice(0, 40) });
       }
     }
+    const interimInput = record(content.interimInputTranscription);
+    if (typeof interimInput?.text === 'string' && interimInput.text) events.push({ kind: 'interimInputTranscript', text: interimInput.text });
     const input = record(content.inputTranscription);
     if (typeof input?.text === 'string' && input.text) events.push({ kind: 'inputTranscript', text: input.text });
     const output = record(content.outputTranscription);
@@ -197,14 +221,19 @@ const MODEL_PATTERN = /^models\/[A-Za-z0-9._-]{1,80}$/;
 const VOICE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{1,29}$/;
 
 /** Optional, non-secret overrides so a model or voice rename never needs a code change. */
-export function geminiSettings(source: Record<string, string | undefined>): { model: string; voiceName: string; languageCode: string } {
+export function geminiSettings(source: Record<string, string | undefined>): { model: string; voiceName: string; languageCode: string; transcriptionLanguageCodes: string[] } {
   const model = source.GEMINI_LIVE_MODEL?.trim();
   const voice = source.GEMINI_VOICE_NAME?.trim();
   const language = source.GEMINI_LANGUAGE_CODE?.trim();
   const languagePattern = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+  const configuredLanguages = source.GEMINI_TRANSCRIPTION_LANGUAGE_CODES?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
+  const transcriptionLanguageCodes = configuredLanguages.length <= 8 && configuredLanguages.every((item) => languagePattern.test(item))
+    ? configuredLanguages
+    : [];
   return {
     model: model && MODEL_PATTERN.test(model) ? model : DEFAULT_GEMINI_LIVE_MODEL,
     voiceName: voice && VOICE_PATTERN.test(voice) ? voice : DEFAULT_VOICE_NAME,
     languageCode: language && languagePattern.test(language) ? language : DEFAULT_LANGUAGE_CODE,
+    transcriptionLanguageCodes,
   };
 }

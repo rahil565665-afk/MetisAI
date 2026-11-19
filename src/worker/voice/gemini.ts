@@ -8,7 +8,7 @@ import { frameToText, type FrameData } from './encoding.js';
 
 export const DEFAULT_GEMINI_LIVE_MODEL = 'models/gemini-3.8-live';
 export const DEFAULT_VOICE_NAME = 'Sulafat';
-export const DEFAULT_LANGUAGE_CODE = 'en-IN';
+export const DEFAULT_LANGUAGE_CODE = 'en-US';
 export const DEFAULT_TRANSCRIBER_MODEL = 'models/gemini-3.5-transcribe-live';
 export const GEMINI_LIVE_ORIGIN = 'https://generativelanguage.googleapis.com';
 const GEMINI_LIVE_PATH = '/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -79,8 +79,18 @@ export function transcriptionSetupMessage(options: TranscriptionSetupOptions): R
     setup: {
       model: DEFAULT_TRANSCRIBER_MODEL,
       generationConfig: { responseModalities: ['TEXT'] },
+      // Let the recognizer own utterance boundaries. High start/end sensitivity captures
+      // short replies (yes/no/hang up) while still using server-side voice activity detection.
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+          endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+          prefixPaddingMs: 200,
+          silenceDurationMs: 650,
+        },
+      },
       inputAudioTranscription: {
-        languageCodes: options.languageCodes,
+        languageCodes: [DEFAULT_LANGUAGE_CODE],
         customVocabulary: options.customVocabulary.slice(0, 100),
         mode: 'VERBATIM',
       },
@@ -221,19 +231,15 @@ const MODEL_PATTERN = /^models\/[A-Za-z0-9._-]{1,80}$/;
 const VOICE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{1,29}$/;
 
 /** Optional, non-secret overrides so a model or voice rename never needs a code change. */
+/** Keep both spoken output and transcription anchored to English. */
 export function geminiSettings(source: Record<string, string | undefined>): { model: string; voiceName: string; languageCode: string; transcriptionLanguageCodes: string[] } {
   const model = source.GEMINI_LIVE_MODEL?.trim();
   const voice = source.GEMINI_VOICE_NAME?.trim();
-  const language = source.GEMINI_LANGUAGE_CODE?.trim();
-  const languagePattern = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
-  const configuredLanguages = source.GEMINI_TRANSCRIPTION_LANGUAGE_CODES?.split(',').map((item) => item.trim()).filter(Boolean) ?? [];
-  const transcriptionLanguageCodes = configuredLanguages.length <= 8 && configuredLanguages.every((item) => languagePattern.test(item))
-    ? configuredLanguages
-    : [];
   return {
     model: model && MODEL_PATTERN.test(model) ? model : DEFAULT_GEMINI_LIVE_MODEL,
     voiceName: voice && VOICE_PATTERN.test(voice) ? voice : DEFAULT_VOICE_NAME,
-    languageCode: language && languagePattern.test(language) ? language : DEFAULT_LANGUAGE_CODE,
-    transcriptionLanguageCodes,
+    // Do not let a dashboard override silently re-enable multilingual recognition or replies.
+    languageCode: DEFAULT_LANGUAGE_CODE,
+    transcriptionLanguageCodes: [DEFAULT_LANGUAGE_CODE],
   };
 }

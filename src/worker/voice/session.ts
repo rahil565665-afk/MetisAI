@@ -13,6 +13,7 @@ import {
   audioChunkMessage,
   parseServerMessage,
   setupMessage,
+  transcriptionSetupMessage,
   textInputMessage,
   toolResponseMessage,
   safeProviderText,
@@ -25,6 +26,7 @@ import {
   GREETING_TRIGGER,
   buildSystemInstruction,
   receptionistTools,
+  receptionistTranscriptionVocabulary,
   runTool,
   type CallFields,
   type CallStore,
@@ -103,6 +105,10 @@ export interface SessionDeps {
   voiceName: string;
   /** BCP-47 language hint passed to Gemini Live. */
   languageCode?: string;
+  /** Optional dedicated streaming speech recognizer; the call falls back if it cannot connect. */
+  connectTranscriber?(apiKey: string): Promise<VoiceSocket>;
+  /** Empty means let the dedicated recognizer auto-detect the caller's language. */
+  transcriptionLanguageCodes?: string[];
   now?: () => Date;
   limits?: Partial<SessionLimits>;
   approvalTimeoutMs?: number;
@@ -156,6 +162,15 @@ export class VoiceSession {
   private readonly limits: SessionLimits;
   private readonly now: () => Date;
   private gemini: VoiceSocket | null = null;
+  /** Dedicated Transcribe Live sidecar. */
+  private transcriber: VoiceSocket | null = null;
+  private transcriberReady = false;
+  private transcriberUnavailable = false;
+  private transcriberReconnecting = false;
+  private transcriberSetupTimer: ReturnType<typeof setTimeout> | undefined;
+  private settleTranscriberSetup: ((ok: boolean) => void) | null = null;
+  private transcriberNotice = '';
+  private agentReady = false;
   /** A replacement connection that has been opened but has not yet accepted its setup message. */
   private pending: VoiceSocket | null = null;
   private pendingSettled: ((ok: boolean) => void) | null = null;
@@ -248,12 +263,14 @@ export class VoiceSession {
     this.prepared = prepared;
     this.callStartedAt = this.now();
 
+    this.transcriberUnavailable = !this.deps.connectTranscriber;
     const created = prepared.store.createCall({
       started_at: this.callStartedAt.toISOString(),
       metadata: { scheduling: this.scheduling() },
     }).catch(() => ({ id: null, problem: 'The call history could not be saved.' }));
     try {
       await this.openInitial();
+      if (this.deps.connectTranscriber) void this.startTranscription();
     } finally {
       const result = await created;
       this.callId = result.id;

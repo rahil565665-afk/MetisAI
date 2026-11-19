@@ -87,6 +87,7 @@ export function buildSystemInstruction(config: ClinicConfig, now: Date, scheduli
   return `You are ${config.personaName}, the ${template.label.toLowerCase()} receptionist for ${business}, on a live browser test call.
 Speak in this tone: ${config.tone}
 Current date and time: ${now.toISOString()} (UTC). In the business time zone (${config.timezone}), the local date and time is ${formatWhen(now, config.timezone)}. Unless the caller names another zone, interpret relative dates such as today and tomorrow using this business-local clock.
+Caller speech may arrive as verbatim text from a dedicated streaming speech recognizer. Treat each caller text turn as the caller's exact words, respond to the latest turn, and do not infer words or personal details that were not spoken.
 SCHEDULING STATUS: ${schedulingText}
 Enabled actions: ${config.enabledActions.booking ? 'booking is enabled in settings' : 'booking is disabled in settings'}; ${config.enabledActions.take_messages ? 'messages are enabled' : 'messages are disabled'}; ${config.enabledActions.hand_off ? 'staff handoff is enabled' : 'staff handoff is disabled'}.
 ${actionText}

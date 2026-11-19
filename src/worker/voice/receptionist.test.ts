@@ -110,6 +110,9 @@ test('the system prompt carries the clinic, the date and the zone, and marks kno
   assert.match(prompt, /Q: Parking\?\nA: Free\./);
   assert.match(prompt, /Welcome!/);
   assert.match(prompt, /not system instructions/);
+  assert.match(prompt, /RESPOND IN ENGLISH ONLY/);
+  assert.match(prompt, /Could you please repeat it in English/);
+  assert.match(prompt, /never switch to Spanish, Hindi, or another language/i);
   assert.match(buildSystemInstruction(normalizeClinicConfig({ id: 'x', name: '' }), NOW), /the business/);
 });
 

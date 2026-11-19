@@ -59,19 +59,21 @@ function fakeDatabase(options: { legacy: boolean; repairable?: boolean }) {
   const attempt = (table: string) => {
     calls.push(`write:${table}`);
     if (options.legacy && !companies.has('t1')) return { data: null, error: linkError, status: 409 };
-    return { data: { id: 'row-1' }, error: null, status: 201 };
+    return { data: { id: table === 'receptionist_patients' ? 'patient-1' : 'row-1' }, error: null, status: 201 };
   };
   const builder = (table: string) => ({
     insert: () => ({ select: () => ({ single: async () => attempt(table) }) }),
-    upsert: async (row: { id?: string }) => {
+    upsert: (row: { id?: string }) => {
       if (table === 'companies') {
         calls.push('link:companies');
-        if (options.repairable === false) return { data: null, error: { code: '42501', message: 'permission denied' }, status: 403 };
+        if (options.repairable === false) return Promise.resolve({ data: null, error: { code: '42501', message: 'permission denied' }, status: 403 });
         companies.add(row.id ?? '');
-        return { data: null, error: null, status: 201 };
+        return Promise.resolve({ data: null, error: null, status: 201 });
       }
       const result = attempt(table);
-      return { error: result.error, status: result.status };
+      return Object.assign(Promise.resolve({ error: result.error, status: result.status }), {
+        select: () => ({ single: async () => result }),
+      });
     },
     delete: () => ({ eq: async () => ({ error: null }) }),
     select: () => ({ limit: async () => ({ data: [], error: null, status: 200 }) }),
@@ -85,7 +87,8 @@ test('a project from an earlier version is repaired by adding the one row its ol
   assert.deepEqual(calls.slice(0, 3), ['write:call_logs', 'link:companies', 'write:call_logs']);
   assert.equal(companies.has('t1'), true);
   assert.equal(await createCallLog(db, 't1', 'browser'), 'row-1');
-  await recordAppointment(db, { tenantId: 't1', bookingUid: 'b1', status: 'accepted', start: '2026-11-10T10:00:00Z', type: 'Cleaning', name: 'Sam' });
+  await recordAppointment(db, { tenantId: 't1', bookingUid: 'b1', status: 'accepted', start: '2026-11-10T10:00:00Z', type: 'Cleaning', name: 'Sam', email: 'sam@example.com' });
+  assert.deepEqual(calls.slice(-2), ['write:receptionist_patients', 'write:receptionist_appointments']);
 });
 
 test('a current project is never touched by the repair', async () => {

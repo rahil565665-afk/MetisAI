@@ -24,9 +24,22 @@ create table if not exists public.call_logs (
 );
 create index if not exists call_logs_tenant_started_idx on public.call_logs (tenant_id, started_at desc);
 
+create table if not exists public.receptionist_patients (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null,
+  full_name text not null,
+  email text not null,
+  phone text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (tenant_id, email)
+);
+create index if not exists receptionist_patients_tenant_email_idx on public.receptionist_patients (tenant_id, email);
+
 create table if not exists public.receptionist_appointments (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null,
+  patient_id uuid references public.receptionist_patients(id) on delete set null,
   cal_booking_uid text not null,
   status text not null default 'accepted' check (status in ('accepted', 'pending', 'cancelled', 'rescheduled', 'rejected', 'unknown')),
   starts_at timestamptz not null,
@@ -42,6 +55,9 @@ create table if not exists public.receptionist_appointments (
 );
 create index if not exists receptionist_appointments_tenant_start_idx on public.receptionist_appointments (tenant_id, starts_at desc);
 
+-- Upgrade projects that ran an earlier version of this schema.
+alter table public.receptionist_appointments add column if not exists patient_id uuid references public.receptionist_patients(id) on delete set null;
+
 -- A project that was set up with an earlier version of this schema had these tables point at a shared
 -- "companies" table. That table no longer exists in the design, so drop the old links (a no-op otherwise).
 alter table public.call_logs drop constraint if exists call_logs_tenant_id_fkey;
@@ -52,6 +68,7 @@ alter table public.receptionist_appointments drop constraint if exists reception
 -- to the service_role) can, and the console keeps that key encrypted on the server.
 alter table public.call_logs enable row level security;
 alter table public.receptionist_appointments enable row level security;
-revoke all on table public.call_logs, public.receptionist_appointments from anon, authenticated;
-grant all on table public.call_logs, public.receptionist_appointments to service_role;
+alter table public.receptionist_patients enable row level security;
+revoke all on table public.call_logs, public.receptionist_appointments, public.receptionist_patients from anon, authenticated;
+grant all on table public.call_logs, public.receptionist_appointments, public.receptionist_patients to service_role;
 grant usage on schema public to service_role;

@@ -159,13 +159,38 @@ export async function updateAgentCallLog(db: SupabaseClient, tenantId: string, c
   if (!result.data) throw new DatabaseAdviceError('The call’s history row could not be found, so it was not updated.');
 }
 
-export async function recordAppointment(db: SupabaseClient, input: { tenantId: string; bookingUid: string; status: string; start: string; end?: string; type: string; name: string; email?: string; phone?: string; callId?: string }): Promise<void> {
+export async function recordAppointment(db: SupabaseClient, input: { tenantId: string; bookingUid: string; status: string; start: string; end?: string; type: string; name: string; email: string; phone?: string; callId?: string }): Promise<void> {
+  const email = input.email.trim().toLowerCase();
+  if (!email) throw new DatabaseAdviceError('An attendee email is required to create the patient record.');
+
+  // Keep one patient per business and email address. A later appointment refreshes the name
+  // and any supplied phone number without erasing a phone number that was already on file.
+  const patientValues: Record<string, unknown> = {
+    tenant_id: input.tenantId,
+    full_name: input.name,
+    email,
+    updated_at: new Date().toISOString(),
+  };
+  if (input.phone) patientValues.phone = input.phone;
+  const patient = await withLegacyLink(db, input.tenantId, () => db.from('receptionist_patients')
+    .upsert(patientValues, { onConflict: 'tenant_id,email' })
+    .select('id')
+    .single());
+  if (patient.error || !patient.data) {
+    throw new DatabaseAdviceError(describeDatabaseError(patient.error, patient.status));
+  }
+  const patientId = (patient.data as { id?: unknown }).id;
+  if (typeof patientId !== 'string' || !patientId) {
+    throw new DatabaseAdviceError('The patient record was saved, but its ID could not be read back.');
+  }
+
   const result = await withLegacyLink(db, input.tenantId, () => db.from('receptionist_appointments').upsert({
-    tenant_id: input.tenantId, cal_booking_uid: input.bookingUid, status: input.status, starts_at: input.start, ends_at: input.end ?? null,
-    appointment_type: input.type, attendee_name: input.name, attendee_email: input.email ?? null, attendee_phone: input.phone ?? null,
+    tenant_id: input.tenantId, patient_id: patientId, cal_booking_uid: input.bookingUid,
+    status: input.status, starts_at: input.start, ends_at: input.end ?? null,
+    appointment_type: input.type, attendee_name: input.name, attendee_email: email, attendee_phone: input.phone ?? null,
     last_call_id: input.callId ?? null, updated_at: new Date().toISOString(),
   }, { onConflict: 'tenant_id,cal_booking_uid' }));
-  if (result.error) throw new Error('Could not store booking record.');
+  if (result.error) throw new DatabaseAdviceError(describeDatabaseError(result.error, result.status));
 }
 
 export async function updateAppointmentStatus(db: SupabaseClient, tenantId: string, bookingUid: string, status: string): Promise<void> {

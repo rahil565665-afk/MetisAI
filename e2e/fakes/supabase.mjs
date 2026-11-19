@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 const [port, expectedKey, flag] = [Number(process.argv[2]), process.argv[3], process.argv[4]];
 const hasTables = flag !== '--no-tables';
 const legacy = flag === '--legacy';
-const tables = { call_logs: [], receptionist_appointments: [], ...(legacy ? { companies: [] } : {}) };
+const tables = { call_logs: [], receptionist_patients: [], receptionist_appointments: [], ...(legacy ? { companies: [] } : {}) };
 
 // Like PostgREST: only the selected columns come back, and `alias:column->>key` / `alias:column->key` read inside a JSON column.
 const project = (rows, select) => {
